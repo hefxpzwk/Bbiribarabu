@@ -1,3 +1,8 @@
+mod app;
+mod git;
+mod ui;
+mod log;
+
 fn main() {
-    println!("Hello, world!");
+    println!("bbiribarabu starting...");
 }
