@@ -8,7 +8,7 @@ pub struct AppState {
 impl AppState {
     /// 앱 시작 시 단 한 번 호출되는 초기화
     pub fn init() -> Result<Self, String> {
-        let branch = current_branch()?;
+        let branch = current_branch()g
 
         Ok(Self {
             current_branch: branch,
