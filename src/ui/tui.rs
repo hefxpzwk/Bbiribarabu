@@ -1,3 +1,23 @@
+enum InputMode {
+    Normal,
+    Editing,
+}
+
+struct UiState {
+    mode: InputMode,
+    input: String,
+}
+
+impl UiState {
+    fn new() -> Self {
+        Self {
+            mode: InputMode::Normal,
+            input: String::new(),
+        }
+    }
+}
+
+
 use std::io::{self, Stdout};
 use crossterm::{
     execute,
@@ -22,7 +42,9 @@ pub fn run(app: &AppState) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_loop(&mut terminal, app);
+    let mut ui_state = UiState::new();
+
+    let res = run_loop(&mut terminal, app, &mut ui_state);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -31,19 +53,25 @@ pub fn run(app: &AppState) -> io::Result<()> {
     res
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &AppState) -> io::Result<()> {
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &AppState,
+    ui: &mut UiState,
+) -> io::Result<()> {
     loop {
         terminal.draw(|f| {
             let size = f.size();
 
-            // 전체를 세로로: 상단 헤더 + 본문
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(0),
+                Constraint::Length(3), // header
+                Constraint::Min(0),    // body
+                Constraint::Length(3), // input
                 ])
                 .split(size);
+
 
             // 헤더
             let header = Paragraph::new(Line::from(vec![
@@ -91,16 +119,67 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &AppState) -
             let list = List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(" Logs "));
             f.render_widget(list, body[1]);
+
+            let input_block = Block::default()
+            .borders(Borders::ALL)
+            .title(match ui.mode {
+                InputMode::Normal => " Press i to add log ",
+                InputMode::Editing => " Enter log (Enter=save, Esc=cancel) ",
+            });
+
+            let input = Paragraph::new(ui.input.as_str())
+                .block(input_block);
+
+            f.render_widget(input, chunks[2]);
+
+            if matches!(ui.mode, InputMode::Editing) {
+                f.set_cursor(
+                    chunks[2].x + ui.input.len() as u16 + 1,
+                    chunks[2].y + 1,
+                );
+            }
+
         })?;
 
-        // 키 입력 (q로 종료만)
+        // 키 입력
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
+                match ui.mode {
+                    InputMode::Normal => match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('i') => {
+                            ui.mode = InputMode::Editing;
+                            ui.input.clear();
+                        }
+                        _ => {}
+                    },
+
+                    InputMode::Editing => match key.code {
+                        KeyCode::Esc => {
+                            ui.mode = InputMode::Normal;
+                            ui.input.clear();
+                        }
+                        KeyCode::Enter => {
+                            if !ui.input.trim().is_empty() {
+                                let _ = app
+                                    .log_store
+                                    .append_text(&app.current_branch, &ui.input);
+                            }
+                            ui.input.clear();
+                            ui.mode = InputMode::Normal;
+                        }
+                        KeyCode::Backspace => {
+                            ui.input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            ui.input.push(c);
+                        }
+                        _ => {}
+                    },
                 }
             }
         }
+
     }
     Ok(())
 }
