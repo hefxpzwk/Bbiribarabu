@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[command(about = "브랜치 컨텍스트 로그 도구", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>, // 👈 Option으로 변경
 }
 
 #[derive(Subcommand, Debug)]
