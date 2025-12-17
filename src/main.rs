@@ -1,8 +1,8 @@
 mod app;
-mod git;
-mod ui;
-mod log;
 mod cli;
+mod git;
+mod log;
+mod ui;
 
 use app::AppState;
 use clap::Parser;
@@ -65,5 +65,4 @@ fn main() {
             }
         }
     }
-
 }

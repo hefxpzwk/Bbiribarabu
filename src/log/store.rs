@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
 use crate::log::model::{BranchLogFile, LogItem};
+use chrono::Local;
 
 #[derive(Debug)]
 pub struct LogStore {
@@ -12,8 +12,7 @@ pub struct LogStore {
 impl LogStore {
     pub fn new(repo_root: &Path) -> Result<Self, String> {
         let base_dir = repo_root.join(".bbiribarabu").join("logs");
-        fs::create_dir_all(&base_dir)
-            .map_err(|e| format!("로그 디렉터리 생성 실패: {}", e))?;
+        fs::create_dir_all(&base_dir).map_err(|e| format!("로그 디렉터리 생성 실패: {}", e))?;
 
         Ok(Self { base_dir })
     }
@@ -37,8 +36,7 @@ impl LogStore {
         let data = fs::read_to_string(&path)
             .map_err(|e| format!("로그 파일 읽기 실패: {} ({})", e, path.display()))?;
 
-        serde_json::from_str(&data)
-            .map_err(|e| format!("로그 JSON 파싱 실패: {}", e))
+        serde_json::from_str(&data).map_err(|e| format!("로그 JSON 파싱 실패: {}", e))
     }
 
     pub fn append_text(&self, branch: &str, text: &str) -> Result<LogItem, String> {
