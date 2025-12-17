@@ -1,3 +1,4 @@
+#[derive(PartialEq)]
 enum InputMode {
     Normal,
     Editing,
@@ -35,7 +36,7 @@ use ratatui::{
 
 use crate::app::AppState;
 
-pub fn run(app: &AppState) -> io::Result<()> {
+pub fn run(app: &mut AppState) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -56,10 +57,19 @@ pub fn run(app: &AppState) -> io::Result<()> {
 
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    app: &AppState,
+    app: &mut AppState,
     ui: &mut UiState,
 ) -> io::Result<()> {
     loop {
+        // 🔄 브랜치 변경 감지
+        app.refresh_branch_if_needed();
+
+        if ui.mode == InputMode::Editing {
+            // 브랜치 바뀌면 입력 취소
+            ui.mode = InputMode::Normal;
+            ui.input.clear();
+        }
+
         terminal.draw(|f| {
             let size = f.size();
 
