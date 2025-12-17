@@ -2,11 +2,14 @@ mod app;
 mod git;
 mod ui;
 mod log;
+mod cli;
 
 use app::AppState;
+use clap::Parser;
+use cli::{Cli, Commands};
 
 fn main() {
-    println!("bbiribarabu starting...");
+    let cli = Cli::parse();
 
     let app_state = match AppState::init() {
         Ok(state) => state,
@@ -16,28 +19,47 @@ fn main() {
         }
     };
 
-    println!("repo: {}", app_state.repo_root.display());
-    println!("branch: {}", app_state.current_branch);
+    match cli.command {
+        Commands::Add { text } => {
+            let item = app_state
+                .log_store
+                .append_text(&app_state.current_branch, &text)
+                .unwrap_or_else(|e| {
+                    eprintln!("로그 추가 실패: {}", e);
+                    std::process::exit(1);
+                });
 
-    // ✅ Stage 2 테스트: 로그 1개 추가
-    let added = app_state
-        .log_store
-        .append_text(&app_state.current_branch, "첫 로그 테스트: 앱 실행됨")
-        .unwrap_or_else(|e| {
-            eprintln!("로그 추가 실패: {}", e);
-            std::process::exit(1);
-        });
+            println!(
+                "✅ 로그 추가됨 [{}] {}",
+                item.created_at.format("%Y-%m-%d %H:%M:%S"),
+                item.text
+            );
+        }
 
-    println!("로그 추가됨: {} / {}", added.id, added.created_at);
+        Commands::List => {
+            let items = app_state
+                .log_store
+                .list(&app_state.current_branch)
+                .unwrap_or_else(|e| {
+                    eprintln!("로그 조회 실패: {}", e);
+                    std::process::exit(1);
+                });
 
-    // ✅ Stage 2 테스트: 로그 목록 출력
-    let items = app_state
-        .log_store
-        .list(&app_state.current_branch)
-        .unwrap_or_else(|e| {
-            eprintln!("로그 조회 실패: {}", e);
-            std::process::exit(1);
-        });
+            if items.is_empty() {
+                println!("📭 현재 브랜치에 로그가 없습니다");
+                return;
+            }
 
-    println!("현재 브랜치 로그 {}개", items.len());
+            println!("📌 브랜치: {}", app_state.current_branch);
+            println!("--------------------------------");
+
+            for item in items {
+                println!(
+                    "[{}] {}",
+                    item.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    item.text
+                );
+            }
+        }
+    }
 }
