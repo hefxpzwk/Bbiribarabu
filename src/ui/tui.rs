@@ -12,12 +12,15 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
-use crate::{app::AppState, ui::terminal::TerminalRunner};
+use crate::{
+    app::AppState,
+    ui::terminal::{OutputKind, TerminalRunner},
+};
 
 #[derive(PartialEq, Eq, Copy, Clone)]
 enum Focus {
@@ -41,7 +44,7 @@ struct UiState {
 impl UiState {
     fn new(repo_root: PathBuf) -> Self {
         Self {
-            focus: Focus::LogInput,
+            focus: Focus::Terminal,
             mode: InputMode::Normal,
             log_input: String::new(),
             terminal: TerminalRunner::new(repo_root),
@@ -122,15 +125,52 @@ fn run_loop(
             // 좌측: 터미널 출력
             let terminal_area = body[0];
             let inner_height = terminal_area.height.saturating_sub(2).max(1) as usize;
-            let output_height = inner_height.saturating_sub(1); // 마지막 줄은 프롬프트
+            let mut output_height = inner_height.saturating_sub(1); // 마지막 줄은 프롬프트
+
+            let buffer_len = ui.terminal.buffer_len();
+            let has_more_above = ui.terminal.scroll > 0;
+            let has_more_below = ui.terminal.scroll + output_height < buffer_len;
+            let show_hint = has_more_above || has_more_below;
+            let hint_height = if show_hint { 1 } else { 0 };
+            output_height = output_height.saturating_sub(hint_height);
+
             let lines = ui.terminal.visible_lines(output_height);
             let padding = output_height.saturating_sub(lines.len());
-            let mut display_lines: Vec<Line> = Vec::with_capacity(output_height + 1);
+            let mut display_lines: Vec<Line> = Vec::with_capacity(output_height + 1 + hint_height);
             display_lines.extend(std::iter::repeat(Line::from("")).take(padding));
-            display_lines.extend(lines.into_iter().map(Line::from));
+            display_lines.extend(lines.into_iter().map(|l| {
+                let style = match l.kind {
+                    OutputKind::Command => Style::default().add_modifier(Modifier::BOLD),
+                    OutputKind::Stderr => Style::default().fg(Color::Red),
+                    OutputKind::Info => {
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::DIM)
+                    }
+                    OutputKind::Stdout => Style::default(),
+                };
+                Line::from(Span::styled(l.text, style))
+            }));
 
-            let prompt = format!("> {}", ui.terminal.input);
-            display_lines.push(Line::from(prompt.clone()));
+            if show_hint {
+                let mut hint_spans = Vec::new();
+                if has_more_above {
+                    hint_spans.push(Span::styled("↑ more ", Style::default().fg(Color::Yellow)));
+                }
+                if has_more_below {
+                    hint_spans.push(Span::styled("↓ more", Style::default().fg(Color::Yellow)));
+                }
+                display_lines.push(Line::from(hint_spans));
+            }
+
+            let prompt = Line::from(vec![
+                Span::styled(
+                    "> ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(ui.terminal.input.clone()),
+            ]);
+            display_lines.push(prompt);
 
             let title = match ui.focus {
                 Focus::Terminal => " Terminal (focus) ",
