@@ -84,6 +84,13 @@ pub struct PtyTerminal {
     parser: Parser,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CursorState {
+    pub draw: bool,
+    pub row: u16,
+    pub col: u16,
+}
+
 impl PtyTerminal {
     pub fn spawn(repo_root: PathBuf, rows: u16, cols: u16) -> Result<Self, String> {
         Ok(Self {
@@ -101,10 +108,6 @@ impl PtyTerminal {
             self.parser.set_size(rows, cols);
             self.parser.set_scrollback(offset);
         }
-    }
-
-    pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.ensure_size(rows, cols);
     }
 
     pub fn send_bytes(&mut self, bytes: &[u8]) {
@@ -128,12 +131,17 @@ impl PtyTerminal {
         screen.rows(0, cols).collect()
     }
 
-    pub fn cursor(&self) -> Option<(u16, u16)> {
-        if self.scroll_offset() > 0 {
+    pub fn cursor_state(&self) -> Option<CursorState> {
+        let screen = self.parser.screen();
+        if self.scroll_offset() > 0 || screen.hide_cursor() {
             return None;
         }
-        let (x, y) = self.parser.screen().cursor_position();
-        Some((x as u16, y as u16))
+        let (row, col) = screen.cursor_position();
+        Some(CursorState {
+            draw: true,
+            row,
+            col,
+        })
     }
 
     pub fn scroll_up(&mut self, lines: usize) {

@@ -104,6 +104,7 @@ fn run_loop(
 
         terminal.draw(|f| {
             let layout = compute_layout(f.size());
+            let mut final_cursor_abs: Option<(u16, u16)> = None;
 
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(" repo: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -141,15 +142,22 @@ fn run_loop(
             f.render_widget(paragraph, inner);
 
             if ui.focus == Focus::Terminal {
-                if let Some((cx, cy)) = ui.pty.cursor() {
-                    if cy < inner.height && cx < inner.width {
-                        f.set_cursor(inner.x + cx, inner.y + cy);
+                if let Some(cursor) = ui.pty.cursor_state() {
+                    if inner.width > 0 && inner.height > 0 && cursor.draw {
+                        let col = cursor.col;
+                        let row = cursor.row;
+                        let clamped_col = col.min(inner.width.saturating_sub(1));
+                        let clamped_row = row.min(inner.height.saturating_sub(1));
+                        let abs_x = inner.x + clamped_col;
+                        let abs_y = inner.y + clamped_row;
+                        final_cursor_abs = Some((abs_x, abs_y));
+                        f.set_cursor(abs_x, abs_y);
                     }
                 }
             }
 
             if ui.debug_overlay {
-                let debug = Paragraph::new(debug_lines(&ui, inner))
+                let debug = Paragraph::new(debug_lines(&ui, &layout, inner, final_cursor_abs))
                     .block(Block::default().borders(Borders::ALL).title(" debug "));
                 let overlay_area = Rect {
                     x: inner.x.saturating_add(1),
@@ -314,18 +322,41 @@ fn compute_layout(area: Rect) -> LayoutInfo {
     }
 }
 
-fn debug_lines(ui: &UiState, viewport: Rect) -> Vec<Line<'static>> {
+fn debug_lines(
+    ui: &UiState,
+    layout: &LayoutInfo,
+    viewport: Rect,
+    final_cursor_abs: Option<(u16, u16)>,
+) -> Vec<Line<'static>> {
     let (rows, cols) = ui.pty.size();
-    let cursor_line = if let Some((x, y)) = ui.pty.cursor() {
-        format!("cursor: {},{}", x, y)
-    } else {
-        "cursor: (hidden)".to_string()
-    };
+    let cursor = ui.pty.cursor_state();
+    let cursor_line = cursor
+        .as_ref()
+        .map(|c| format!("cursor(raw): row={}, col={}", c.row, c.col))
+        .unwrap_or_else(|| "cursor(raw): (hidden)".to_string());
+    let draw_cursor = cursor.map(|c| c.draw).unwrap_or(false);
+    let follow = ui.pty.scroll_offset() == 0;
+    let final_cursor_line = final_cursor_abs
+        .map(|(x, y)| format!("cursor(abs): {},{}", x, y))
+        .unwrap_or_else(|| "cursor(abs): (not drawn)".to_string());
     vec![
+        Line::from(format!(
+            "terminal rect: ({}, {}) {}x{}",
+            layout.terminal.x, layout.terminal.y, layout.terminal.width, layout.terminal.height
+        )),
+        Line::from(format!(
+            "inner rect: ({}, {}) {}x{}",
+            layout.term_inner.x,
+            layout.term_inner.y,
+            layout.term_inner.width,
+            layout.term_inner.height
+        )),
         Line::from(cursor_line),
+        Line::from(final_cursor_line),
         Line::from(format!("pty size: {}x{}", rows, cols)),
         Line::from(format!("viewport: {}x{}", viewport.height, viewport.width)),
         Line::from(format!("scroll_offset: {}", ui.pty.scroll_offset())),
+        Line::from(format!("follow: {}", if follow { "yes" } else { "no" })),
         Line::from(format!(
             "alt_screen: {}",
             if ui.pty.alternate_screen() {
@@ -333,6 +364,10 @@ fn debug_lines(ui: &UiState, viewport: Rect) -> Vec<Line<'static>> {
             } else {
                 "no"
             }
+        )),
+        Line::from(format!(
+            "draw_cursor: {}",
+            if draw_cursor { "true" } else { "false" }
         )),
     ]
 }
