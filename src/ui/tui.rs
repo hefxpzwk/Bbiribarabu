@@ -1,11 +1,12 @@
 use std::{
     io::{self, Stdout},
     path::PathBuf,
+    time::Duration,
 };
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -14,23 +15,23 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
     app::AppState,
-    ui::terminal::{OutputKind, TerminalRunner},
+    ui::pty_terminal::{PtyTerminal, encode_key_event},
 };
 
-#[derive(PartialEq, Eq, Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum Focus {
     Terminal,
     LogInput,
 }
 
-#[derive(PartialEq, Eq, Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum InputMode {
     Normal,
     EditingLog,
@@ -40,25 +41,19 @@ struct UiState {
     focus: Focus,
     mode: InputMode,
     log_input: String,
-    history: Vec<String>,
-    history_index: usize,
-    terminal: TerminalRunner,
+    pty: PtyTerminal,
+    pending_resize: Option<(u16, u16)>,
 }
 
 impl UiState {
-    fn new(repo_root: PathBuf) -> Self {
-        Self {
+    fn new(repo_root: PathBuf, rows: u16, cols: u16) -> Result<Self, String> {
+        Ok(Self {
             focus: Focus::Terminal,
             mode: InputMode::Normal,
             log_input: String::new(),
-            history: Vec::new(),
-            history_index: 0,
-            terminal: TerminalRunner::new(repo_root),
-        }
-    }
-
-    fn reset_history_pos(&mut self) {
-        self.history_index = self.history.len();
+            pty: PtyTerminal::spawn(repo_root, rows, cols)?,
+            pending_resize: None,
+        })
     }
 }
 
@@ -69,7 +64,11 @@ pub fn run(app: &mut AppState) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut ui_state = UiState::new(app.repo_root.clone());
+    let size = terminal.size()?;
+    let term_rows = size.height.saturating_sub(4);
+    let term_cols = (size.width as f32 * 0.6) as u16;
+    let mut ui_state =
+        UiState::new(app.repo_root.clone(), term_rows, term_cols).map_err(to_io_error)?;
 
     let res = run_loop(&mut terminal, app, &mut ui_state);
 
@@ -90,32 +89,26 @@ fn run_loop(
     ui: &mut UiState,
 ) -> io::Result<()> {
     loop {
-        // 🔄 브랜치 변경 감지
         let prev_branch = app.current_branch.clone();
         app.refresh_branch_if_needed();
-        let branch_changed = prev_branch != app.current_branch;
-
-        // 브랜치가 바뀌면 로그 입력은 취소
-        if branch_changed && ui.mode == InputMode::EditingLog {
+        if prev_branch != app.current_branch && ui.mode == InputMode::EditingLog {
             ui.mode = InputMode::Normal;
             ui.log_input.clear();
         }
 
-        ui.terminal.poll_output();
+        ui.pty.poll_output();
 
         terminal.draw(|f| {
             let size = f.size();
-
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3), // header
-                    Constraint::Min(0),    // body
-                    Constraint::Length(3), // input
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(3),
                 ])
                 .split(size);
 
-            // 헤더
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(" repo: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(app.repo_root.display().to_string()),
@@ -130,81 +123,41 @@ fn run_loop(
             );
             f.render_widget(header, chunks[0]);
 
-            // 본문 좌/우 분할
             let body = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(chunks[1]);
 
-            // 좌측: 터미널 출력
-            let terminal_area = body[0];
+            // Terminal panel
+            let term_area = body[0];
             let title = match ui.focus {
                 Focus::Terminal => " Terminal (focus) ",
                 Focus::LogInput => " Terminal ",
             };
-            let terminal_block = Block::default().borders(Borders::ALL).title(title);
-            let inner = terminal_block.inner(terminal_area);
-            let [output_area, prompt_area] = *Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(inner)
-            else {
-                unreachable!()
-            };
+            let block = Block::default().borders(Borders::ALL).title(title);
+            let inner = block.inner(term_area);
 
-            let output_height = output_area.height as usize;
+            let display_lines = ui.pty.lines(inner.height);
+            let paragraph = Paragraph::new(
+                display_lines
+                    .clone()
+                    .into_iter()
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .wrap(Wrap { trim: false });
+            f.render_widget(block, term_area);
+            f.render_widget(paragraph, inner);
 
-            let lines = ui.terminal.visible_lines(output_height);
-            let display_lines: Vec<Line> = lines
-                .into_iter()
-                .map(|l| {
-                    let style = match l.kind {
-                        OutputKind::Command { .. } => Style::default()
-                            .add_modifier(Modifier::BOLD)
-                            .fg(Color::Gray),
-                        OutputKind::Stderr {
-                            exit_success,
-                            is_errorish,
-                        } => {
-                            if !exit_success || is_errorish {
-                                Style::default().fg(Color::Red)
-                            } else {
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::DIM)
-                            }
-                        }
-                        OutputKind::Info => Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM | Modifier::ITALIC),
-                        OutputKind::Stdout => Style::default(),
-                    };
-                    Line::from(Span::styled(l.text, style))
-                })
-                .collect();
+            if ui.focus == Focus::Terminal {
+                if let Some((cx, cy)) = ui.pty.cursor() {
+                    if cy < inner.height && cx < inner.width {
+                        f.set_cursor(inner.x + cx, inner.y + cy);
+                    }
+                }
+            }
 
-            let prompt_line = {
-                let repo_name = app
-                    .repo_root
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("repo");
-                Line::from(vec![
-                    Span::styled(
-                        format!("{}({})", repo_name, app.current_branch),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" $ ", Style::default().add_modifier(Modifier::DIM)),
-                    Span::raw(&ui.terminal.input),
-                ])
-            };
-
-            let output_widget = Paragraph::new(display_lines).wrap(Wrap { trim: false });
-            f.render_widget(terminal_block, terminal_area);
-            f.render_widget(output_widget, output_area);
-            f.render_widget(Paragraph::new(prompt_line), prompt_area);
-
-            // 우측: 로그 리스트
+            // Logs
             let items = app
                 .log_store
                 .list(&app.current_branch)
@@ -221,11 +174,11 @@ fn run_loop(
                     ]))
                 })
                 .collect::<Vec<_>>();
-
-            let list =
+            let log_block =
                 List::new(items).block(Block::default().borders(Borders::ALL).title(" Logs "));
-            f.render_widget(list, body[1]);
+            f.render_widget(log_block, body[1]);
 
+            // Input bar
             let input_block =
                 Block::default()
                     .borders(Borders::ALL)
@@ -240,87 +193,35 @@ fn run_loop(
                     });
 
             let input_text = ui.log_input.as_str();
-
             let input = Paragraph::new(input_text).block(input_block);
-
             f.render_widget(input, chunks[2]);
 
             if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
                 let cursor_pos = ui.log_input.len();
                 f.set_cursor(chunks[2].x + cursor_pos as u16 + 1, chunks[2].y + 1);
             }
-
-            if ui.focus == Focus::Terminal {
-                let cursor_x = terminal_area.x + 2 + ui.terminal.input.len() as u16;
-                let cursor_y = terminal_area.y + terminal_area.height.saturating_sub(2);
-                f.set_cursor(cursor_x, cursor_y);
-            }
         })?;
 
-        // 키 입력
-        if event::poll(std::time::Duration::from_millis(200))? {
+        if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') if ui.focus == Focus::Terminal => break,
                         KeyCode::Tab => {
                             ui.focus = match ui.focus {
                                 Focus::Terminal => Focus::LogInput,
                                 Focus::LogInput => Focus::Terminal,
                             };
-                            if ui.focus == Focus::Terminal && ui.mode == InputMode::EditingLog {
-                                ui.mode = InputMode::Normal;
-                                ui.log_input.clear();
-                            }
                         }
                         _ => {}
                     }
 
                     match ui.focus {
-                        Focus::Terminal => match key.code {
-                            KeyCode::Enter => {
-                                let cmd = ui.terminal.input.trim().to_string();
-                                if !cmd.is_empty() {
-                                    ui.terminal.run_command(&cmd);
-                                    ui.history.push(cmd);
-                                    ui.reset_history_pos();
-                                }
-                                ui.terminal.input.clear();
+                        Focus::Terminal => {
+                            if let Some(bytes) = encode_key_event(key) {
+                                ui.pty.send_bytes(&bytes);
                             }
-                            KeyCode::Backspace => {
-                                ui.terminal.input.pop();
-                                ui.reset_history_pos();
-                            }
-                            KeyCode::Char(c) => {
-                                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
-                                {
-                                    ui.terminal.input.push(c);
-                                    ui.reset_history_pos();
-                                }
-                            }
-                            KeyCode::Up => {
-                                if !ui.history.is_empty() {
-                                    if ui.history_index == ui.history.len() {
-                                        ui.history_index = ui.history.len().saturating_sub(1);
-                                    } else if ui.history_index > 0 {
-                                        ui.history_index -= 1;
-                                    }
-                                    ui.terminal.input = ui.history[ui.history_index].clone();
-                                }
-                            }
-                            KeyCode::Down => {
-                                if ui.history_index + 1 < ui.history.len() {
-                                    ui.history_index += 1;
-                                    ui.terminal.input = ui.history[ui.history_index].clone();
-                                } else {
-                                    ui.history_index = ui.history.len();
-                                    ui.terminal.input.clear();
-                                }
-                            }
-                            KeyCode::PageUp => ui.terminal.scroll_up(10),
-                            KeyCode::PageDown => ui.terminal.scroll_down(10),
-                            _ => {}
-                        },
+                        }
                         Focus::LogInput => match ui.mode {
                             InputMode::Normal => match key.code {
                                 KeyCode::Char('i') => {
@@ -355,13 +256,26 @@ fn run_loop(
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => ui.terminal.scroll_up(3),
-                    MouseEventKind::ScrollDown => ui.terminal.scroll_down(3),
+                    MouseEventKind::ScrollUp => ui.pty.scroll_up(3),
+                    MouseEventKind::ScrollDown => ui.pty.scroll_down(3),
                     _ => {}
                 },
+                Event::Resize(rows, cols) => {
+                    ui.pending_resize = Some((rows, cols));
+                }
                 _ => {}
             }
         }
+
+        if let Some((rows, cols)) = ui.pending_resize.take() {
+            let term_rows = rows.saturating_sub(4);
+            let term_cols = (cols as f32 * 0.6) as u16;
+            ui.pty.resize(term_rows, term_cols);
+        }
     }
     Ok(())
+}
+
+fn to_io_error(e: String) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e)
 }

@@ -12,3 +12,6 @@ clap = { version = "4", features = ["derive"] }
 # TUI
 ratatui = "0.26"
 crossterm = "0.27"
+portable-pty = "0.8"
+vt100 = "0.15"
+unicode-width = "0.1"
