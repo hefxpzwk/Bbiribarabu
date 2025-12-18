@@ -82,7 +82,6 @@ impl PtyShell {
 pub struct PtyTerminal {
     shell: PtyShell,
     parser: Parser,
-    scrollback_offset: usize,
 }
 
 impl PtyTerminal {
@@ -90,18 +89,29 @@ impl PtyTerminal {
         Ok(Self {
             shell: PtyShell::spawn(repo_root, rows, cols)?,
             parser: Parser::new(rows, cols, 10_000),
-            scrollback_offset: 0,
         })
     }
 
+    /// Keep shell/VT size in sync with the current panel inner size.
+    pub fn ensure_size(&mut self, rows: u16, cols: u16) {
+        let (current_rows, current_cols) = self.parser.screen().size();
+        if current_rows != rows || current_cols != cols {
+            let offset = self.scroll_offset();
+            self.shell.resize(rows, cols);
+            self.parser.set_size(rows, cols);
+            self.parser.set_scrollback(offset);
+        }
+    }
+
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.shell.resize(rows, cols);
-        self.parser.set_size(rows, cols);
-        self.scrollback_offset = 0;
+        self.ensure_size(rows, cols);
     }
 
     pub fn send_bytes(&mut self, bytes: &[u8]) {
-        self.scrollback_offset = 0;
+        // Only follow the live view when already at the bottom; keep sticky scroll otherwise.
+        if self.scroll_offset() == 0 {
+            self.parser.set_scrollback(0);
+        }
         self.shell.write(bytes);
     }
 
@@ -112,32 +122,14 @@ impl PtyTerminal {
         }
     }
 
-    pub fn lines(&self, height: u16) -> Vec<String> {
-        let all_lines: Vec<String> = self
-            .parser
-            .screen()
-            .contents()
-            .lines()
-            .map(|l| l.to_string())
-            .collect();
-
-        let total = all_lines.len();
-        let end = total.saturating_sub(self.scrollback_offset);
-        let start = end.saturating_sub(height as usize);
-
-        let mut visible = all_lines.get(start..end).unwrap_or(&[]).to_vec();
-        if visible.len() < height as usize {
-            let pad = height as usize - visible.len();
-            let mut padding = vec![String::new(); pad];
-            padding.append(&mut visible);
-            visible = padding;
-        }
-
-        visible
+    pub fn lines(&self) -> Vec<String> {
+        let screen = self.parser.screen();
+        let (_rows, cols) = screen.size();
+        screen.rows(0, cols).collect()
     }
 
     pub fn cursor(&self) -> Option<(u16, u16)> {
-        if self.scrollback_offset > 0 {
+        if self.scroll_offset() > 0 {
             return None;
         }
         let (x, y) = self.parser.screen().cursor_position();
@@ -145,16 +137,25 @@ impl PtyTerminal {
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
-        let total_lines = self.parser.screen().contents().lines().count();
-        if total_lines == 0 {
-            return;
-        }
-        let max_scroll = total_lines.saturating_sub(1);
-        self.scrollback_offset = (self.scrollback_offset + lines).min(max_scroll);
+        let offset = self.scroll_offset().saturating_add(lines);
+        self.parser.set_scrollback(offset);
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
-        self.scrollback_offset = self.scrollback_offset.saturating_sub(lines);
+        let offset = self.scroll_offset().saturating_sub(lines);
+        self.parser.set_scrollback(offset);
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        self.parser.screen().size()
+    }
+
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
     }
 }
 

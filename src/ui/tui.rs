@@ -5,16 +5,14 @@ use std::{
 };
 
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
@@ -42,7 +40,7 @@ struct UiState {
     mode: InputMode,
     log_input: String,
     pty: PtyTerminal,
-    pending_resize: Option<(u16, u16)>,
+    debug_overlay: bool,
 }
 
 impl UiState {
@@ -52,7 +50,7 @@ impl UiState {
             mode: InputMode::Normal,
             log_input: String::new(),
             pty: PtyTerminal::spawn(repo_root, rows, cols)?,
-            pending_resize: None,
+            debug_overlay: false,
         })
     }
 }
@@ -65,10 +63,13 @@ pub fn run(app: &mut AppState) -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let size = terminal.size()?;
-    let term_rows = size.height.saturating_sub(4);
-    let term_cols = (size.width as f32 * 0.6) as u16;
-    let mut ui_state =
-        UiState::new(app.repo_root.clone(), term_rows, term_cols).map_err(to_io_error)?;
+    let layout = compute_layout(size);
+    let mut ui_state = UiState::new(
+        app.repo_root.clone(),
+        layout.term_inner.height,
+        layout.term_inner.width,
+    )
+    .map_err(to_io_error)?;
 
     let res = run_loop(&mut terminal, app, &mut ui_state);
 
@@ -96,18 +97,13 @@ fn run_loop(
             ui.log_input.clear();
         }
 
+        let layout = compute_layout(terminal.size()?);
+        ui.pty
+            .ensure_size(layout.term_inner.height, layout.term_inner.width);
         ui.pty.poll_output();
 
         terminal.draw(|f| {
-            let size = f.size();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(0),
-                    Constraint::Length(3),
-                ])
-                .split(size);
+            let layout = compute_layout(f.size());
 
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(" repo: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -121,23 +117,18 @@ fn run_loop(
                     .borders(Borders::ALL)
                     .title(" bbiribarabu "),
             );
-            f.render_widget(header, chunks[0]);
-
-            let body = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(chunks[1]);
+            f.render_widget(header, layout.header);
 
             // Terminal panel
-            let term_area = body[0];
+            let term_area = layout.terminal;
             let title = match ui.focus {
                 Focus::Terminal => " Terminal (focus) ",
                 Focus::LogInput => " Terminal ",
             };
             let block = Block::default().borders(Borders::ALL).title(title);
-            let inner = block.inner(term_area);
+            let inner = layout.term_inner;
 
-            let display_lines = ui.pty.lines(inner.height);
+            let display_lines = ui.pty.lines();
             let paragraph = Paragraph::new(
                 display_lines
                     .clone()
@@ -155,6 +146,18 @@ fn run_loop(
                         f.set_cursor(inner.x + cx, inner.y + cy);
                     }
                 }
+            }
+
+            if ui.debug_overlay {
+                let debug = Paragraph::new(debug_lines(&ui, inner))
+                    .block(Block::default().borders(Borders::ALL).title(" debug "));
+                let overlay_area = Rect {
+                    x: inner.x.saturating_add(1),
+                    y: inner.y.saturating_add(1),
+                    width: inner.width.min(32),
+                    height: inner.height.min(6),
+                };
+                f.render_widget(debug, overlay_area);
             }
 
             // Logs
@@ -176,7 +179,7 @@ fn run_loop(
                 .collect::<Vec<_>>();
             let log_block =
                 List::new(items).block(Block::default().borders(Borders::ALL).title(" Logs "));
-            f.render_widget(log_block, body[1]);
+            f.render_widget(log_block, layout.logs);
 
             // Input bar
             let input_block =
@@ -194,11 +197,11 @@ fn run_loop(
 
             let input_text = ui.log_input.as_str();
             let input = Paragraph::new(input_text).block(input_block);
-            f.render_widget(input, chunks[2]);
+            f.render_widget(input, layout.input);
 
             if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
                 let cursor_pos = ui.log_input.len();
-                f.set_cursor(chunks[2].x + cursor_pos as u16 + 1, chunks[2].y + 1);
+                f.set_cursor(layout.input.x + cursor_pos as u16 + 1, layout.input.y + 1);
             }
         })?;
 
@@ -212,6 +215,9 @@ fn run_loop(
                                 Focus::Terminal => Focus::LogInput,
                                 Focus::LogInput => Focus::Terminal,
                             };
+                        }
+                        KeyCode::F(2) => {
+                            ui.debug_overlay = !ui.debug_overlay;
                         }
                         _ => {}
                     }
@@ -260,20 +266,75 @@ fn run_loop(
                     MouseEventKind::ScrollDown => ui.pty.scroll_down(3),
                     _ => {}
                 },
-                Event::Resize(rows, cols) => {
-                    ui.pending_resize = Some((rows, cols));
-                }
+                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
-
-        if let Some((rows, cols)) = ui.pending_resize.take() {
-            let term_rows = rows.saturating_sub(4);
-            let term_cols = (cols as f32 * 0.6) as u16;
-            ui.pty.resize(term_rows, term_cols);
-        }
     }
     Ok(())
+}
+
+struct LayoutInfo {
+    header: Rect,
+    terminal: Rect,
+    logs: Rect,
+    input: Rect,
+    term_inner: Rect,
+}
+
+fn compute_layout(area: Rect) -> LayoutInfo {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
+
+    let term_area = body[0];
+    let term_inner = Rect {
+        x: term_area.x.saturating_add(1),
+        y: term_area.y.saturating_add(1),
+        width: term_area.width.saturating_sub(2),
+        height: term_area.height.saturating_sub(2),
+    };
+
+    LayoutInfo {
+        header: chunks[0],
+        terminal: term_area,
+        logs: body[1],
+        input: chunks[2],
+        term_inner,
+    }
+}
+
+fn debug_lines(ui: &UiState, viewport: Rect) -> Vec<Line<'static>> {
+    let (rows, cols) = ui.pty.size();
+    let cursor_line = if let Some((x, y)) = ui.pty.cursor() {
+        format!("cursor: {},{}", x, y)
+    } else {
+        "cursor: (hidden)".to_string()
+    };
+    vec![
+        Line::from(cursor_line),
+        Line::from(format!("pty size: {}x{}", rows, cols)),
+        Line::from(format!("viewport: {}x{}", viewport.height, viewport.width)),
+        Line::from(format!("scroll_offset: {}", ui.pty.scroll_offset())),
+        Line::from(format!(
+            "alt_screen: {}",
+            if ui.pty.alternate_screen() {
+                "yes"
+            } else {
+                "no"
+            }
+        )),
+    ]
 }
 
 fn to_io_error(e: String) -> io::Error {
