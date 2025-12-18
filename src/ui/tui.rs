@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
@@ -138,64 +138,71 @@ fn run_loop(
 
             // 좌측: 터미널 출력
             let terminal_area = body[0];
-            let inner_height = terminal_area.height.saturating_sub(2).max(1) as usize;
-            let mut output_height = inner_height.saturating_sub(1); // 마지막 줄은 프롬프트
-
-            let buffer_len = ui.terminal.buffer_len();
-            let has_more_above = ui.terminal.scroll > 0;
-            let has_more_below = ui.terminal.scroll + output_height < buffer_len;
-            let show_hint = has_more_above || has_more_below;
-            let hint_height = if show_hint { 1 } else { 0 };
-            output_height = output_height.saturating_sub(hint_height);
-
-            let lines = ui.terminal.visible_lines(output_height);
-            let padding = output_height.saturating_sub(lines.len());
-            let mut display_lines: Vec<Line> = Vec::with_capacity(output_height + 1 + hint_height);
-            display_lines.extend(std::iter::repeat(Line::from("")).take(padding));
-            display_lines.extend(lines.into_iter().map(|l| {
-                let style = match l.kind {
-                    OutputKind::Command => Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                    OutputKind::Stderr => Style::default().fg(Color::Red),
-                    OutputKind::Info => Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::DIM | Modifier::ITALIC),
-                    OutputKind::Stdout => Style::default(),
-                };
-                Line::from(Span::styled(l.text, style))
-            }));
-
-            if show_hint {
-                let mut hint_spans = Vec::new();
-                if has_more_above {
-                    hint_spans.push(Span::styled("↑ more ", Style::default().fg(Color::Yellow)));
-                }
-                if has_more_below {
-                    hint_spans.push(Span::styled("↓ more", Style::default().fg(Color::Yellow)));
-                }
-                display_lines.push(Line::from(hint_spans));
-            }
-
-            let prompt = Line::from(vec![
-                Span::styled(
-                    "> ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(ui.terminal.input.clone()),
-            ]);
-            display_lines.push(prompt);
-
             let title = match ui.focus {
                 Focus::Terminal => " Terminal (focus) ",
                 Focus::LogInput => " Terminal ",
             };
+            let terminal_block = Block::default().borders(Borders::ALL).title(title);
+            let inner = terminal_block.inner(terminal_area);
+            let [output_area, prompt_area] = *Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(inner)
+            else {
+                unreachable!()
+            };
 
-            let left = Paragraph::new(display_lines)
-                .block(Block::default().borders(Borders::ALL).title(title));
-            f.render_widget(left, terminal_area);
+            let output_height = output_area.height as usize;
+
+            let lines = ui.terminal.visible_lines(output_height);
+            let display_lines: Vec<Line> = lines
+                .into_iter()
+                .map(|l| {
+                    let style = match l.kind {
+                        OutputKind::Command { .. } => Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .fg(Color::Gray),
+                        OutputKind::Stderr {
+                            exit_success,
+                            is_errorish,
+                        } => {
+                            if !exit_success || is_errorish {
+                                Style::default().fg(Color::Red)
+                            } else {
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::DIM)
+                            }
+                        }
+                        OutputKind::Info => Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM | Modifier::ITALIC),
+                        OutputKind::Stdout => Style::default(),
+                    };
+                    Line::from(Span::styled(l.text, style))
+                })
+                .collect();
+
+            let prompt_line = {
+                let repo_name = app
+                    .repo_root
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("repo");
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}({})", repo_name, app.current_branch),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" $ ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::raw(&ui.terminal.input),
+                ])
+            };
+
+            let output_widget = Paragraph::new(display_lines).wrap(Wrap { trim: false });
+            f.render_widget(terminal_block, terminal_area);
+            f.render_widget(output_widget, output_area);
+            f.render_widget(Paragraph::new(prompt_line), prompt_area);
 
             // 우측: 로그 리스트
             let items = app

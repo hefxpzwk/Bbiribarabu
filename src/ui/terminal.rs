@@ -8,9 +8,14 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum OutputKind {
-    Command,
+    Command {
+        exit_code: i32,
+    },
     Stdout,
-    Stderr,
+    Stderr {
+        exit_success: bool,
+        is_errorish: bool,
+    },
     Info,
 }
 
@@ -41,7 +46,7 @@ impl TerminalRunner {
             input: String::new(),
             scroll: 0,
             buffer: VecDeque::new(),
-            max_lines: 500,
+            max_lines: 1000,
             tx_cmd,
             rx_out,
         };
@@ -54,20 +59,11 @@ impl TerminalRunner {
     }
 
     fn command_loop(repo_root: PathBuf, rx_cmd: Receiver<String>, tx_out: Sender<OutputLine>) {
-        let mut first_command = true;
         while let Ok(cmd) = rx_cmd.recv() {
             let trimmed = cmd.trim();
             if trimmed.is_empty() {
                 continue;
             }
-
-            if !first_command {
-                let _ = tx_out.send(OutputLine {
-                    kind: OutputKind::Info,
-                    text: String::new(),
-                });
-            }
-            first_command = false;
 
             let output = Command::new("bash")
                 .arg("--noprofile")
@@ -85,16 +81,15 @@ impl TerminalRunner {
                 ),
                 Err(err) => {
                     let _ = tx_out.send(OutputLine {
-                        kind: OutputKind::Command,
+                        kind: OutputKind::Command { exit_code: -1 },
                         text: format!("$ {}   (failed to start)", trimmed),
                     });
                     let _ = tx_out.send(OutputLine {
-                        kind: OutputKind::Stderr,
-                        text: format!("[error] {}", err),
-                    });
-                    let _ = tx_out.send(OutputLine {
-                        kind: OutputKind::Info,
-                        text: "--------------------------------".into(),
+                        kind: OutputKind::Stderr {
+                            exit_success: false,
+                            is_errorish: true,
+                        },
+                        text: format!("error: {}", err),
                     });
                     continue;
                 }
@@ -104,12 +99,8 @@ impl TerminalRunner {
             let success = status.success();
 
             let _ = tx_out.send(OutputLine {
-                kind: OutputKind::Command,
+                kind: OutputKind::Command { exit_code },
                 text: format!("$ {}   (exit={})", trimmed, exit_code),
-            });
-            let _ = tx_out.send(OutputLine {
-                kind: OutputKind::Info,
-                text: "--------------------------------".into(),
             });
 
             for line in stdout.lines() {
@@ -123,17 +114,14 @@ impl TerminalRunner {
                 let lowered = line.trim_start().to_lowercase();
                 let is_error_prefix =
                     lowered.starts_with("error:") || lowered.starts_with("fatal:");
-                let kind = if success && !is_error_prefix {
-                    OutputKind::Info
-                } else {
-                    OutputKind::Stderr
+                let kind = OutputKind::Stderr {
+                    exit_success: success,
+                    is_errorish: !success || is_error_prefix,
                 };
-                let text = if kind == OutputKind::Stderr && !line.starts_with("[error]") {
-                    format!("[error] {}", line)
-                } else {
-                    line.to_string()
-                };
-                let _ = tx_out.send(OutputLine { kind, text });
+                let _ = tx_out.send(OutputLine {
+                    kind,
+                    text: line.to_string(),
+                });
             }
         }
     }
@@ -180,10 +168,6 @@ impl TerminalRunner {
             .take(end.saturating_sub(start))
             .cloned()
             .collect()
-    }
-
-    pub fn buffer_len(&self) -> usize {
-        self.buffer.len()
     }
 
     pub fn scroll_up(&mut self, amount: usize) {
