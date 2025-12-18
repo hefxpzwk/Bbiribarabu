@@ -1,13 +1,12 @@
 use std::{
     collections::VecDeque,
-    io::{BufRead, BufReader, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum OutputKind {
     Command,
     Stdout,
@@ -55,53 +54,6 @@ impl TerminalRunner {
     }
 
     fn command_loop(repo_root: PathBuf, rx_cmd: Receiver<String>, tx_out: Sender<OutputLine>) {
-        let mut child = match Command::new("bash")
-            .arg("--noprofile")
-            .arg("--norc")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(&repo_root)
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) => {
-                let _ = tx_out.send(OutputLine {
-                    kind: OutputKind::Stderr,
-                    text: format!("[error] failed to start bash: {}", err),
-                });
-                return;
-            }
-        };
-
-        // stdout reader
-        if let Some(stdout) = child.stdout.take() {
-            let tx = tx_out.clone();
-            thread::spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().flatten() {
-                    let _ = tx.send(OutputLine {
-                        kind: OutputKind::Stdout,
-                        text: line,
-                    });
-                }
-            });
-        }
-
-        // stderr reader
-        if let Some(stderr) = child.stderr.take() {
-            let tx = tx_out.clone();
-            thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().flatten() {
-                    let _ = tx.send(OutputLine {
-                        kind: OutputKind::Stderr,
-                        text: format!("[error] {}", line),
-                    });
-                }
-            });
-        }
-
         let mut first_command = true;
         while let Ok(cmd) = rx_cmd.recv() {
             let trimmed = cmd.trim();
@@ -117,33 +69,71 @@ impl TerminalRunner {
             }
             first_command = false;
 
+            let output = Command::new("bash")
+                .arg("--noprofile")
+                .arg("--norc")
+                .arg("-lc")
+                .arg(trimmed)
+                .current_dir(&repo_root)
+                .output();
+
+            let (status, stdout, stderr) = match output {
+                Ok(out) => (
+                    out.status,
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    String::from_utf8_lossy(&out.stderr).into_owned(),
+                ),
+                Err(err) => {
+                    let _ = tx_out.send(OutputLine {
+                        kind: OutputKind::Command,
+                        text: format!("$ {}   (failed to start)", trimmed),
+                    });
+                    let _ = tx_out.send(OutputLine {
+                        kind: OutputKind::Stderr,
+                        text: format!("[error] {}", err),
+                    });
+                    let _ = tx_out.send(OutputLine {
+                        kind: OutputKind::Info,
+                        text: "--------------------------------".into(),
+                    });
+                    continue;
+                }
+            };
+
+            let exit_code = status.code().unwrap_or(-1);
+            let success = status.success();
+
             let _ = tx_out.send(OutputLine {
                 kind: OutputKind::Command,
-                text: format!("$ {}", trimmed),
+                text: format!("$ {}   (exit={})", trimmed, exit_code),
             });
             let _ = tx_out.send(OutputLine {
                 kind: OutputKind::Info,
                 text: "--------------------------------".into(),
             });
 
-            match child.stdin.as_mut() {
-                Some(stdin) => {
-                    if writeln!(stdin, "{}", trimmed).is_err() {
-                        let _ = tx_out.send(OutputLine {
-                            kind: OutputKind::Stderr,
-                            text: "[error] failed to write to shell stdin".into(),
-                        });
-                        break;
-                    }
-                    let _ = stdin.flush();
-                }
-                None => {
-                    let _ = tx_out.send(OutputLine {
-                        kind: OutputKind::Stderr,
-                        text: "[error] shell stdin closed".into(),
-                    });
-                    break;
-                }
+            for line in stdout.lines() {
+                let _ = tx_out.send(OutputLine {
+                    kind: OutputKind::Stdout,
+                    text: line.to_string(),
+                });
+            }
+
+            for line in stderr.lines() {
+                let lowered = line.trim_start().to_lowercase();
+                let is_error_prefix =
+                    lowered.starts_with("error:") || lowered.starts_with("fatal:");
+                let kind = if success && !is_error_prefix {
+                    OutputKind::Info
+                } else {
+                    OutputKind::Stderr
+                };
+                let text = if kind == OutputKind::Stderr && !line.starts_with("[error]") {
+                    format!("[error] {}", line)
+                } else {
+                    line.to_string()
+                };
+                let _ = tx_out.send(OutputLine { kind, text });
             }
         }
     }
