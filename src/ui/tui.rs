@@ -17,29 +17,34 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
-use crate::{app::AppState, ui::terminal::ShellRunner};
+use crate::{app::AppState, ui::terminal::TerminalRunner};
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum Focus {
+    Terminal,
+    LogInput,
+}
+
+#[derive(PartialEq, Eq, Copy, Clone)]
 enum InputMode {
     Normal,
     EditingLog,
-    EditingShell,
 }
 
 struct UiState {
+    focus: Focus,
     mode: InputMode,
     log_input: String,
-    shell_input: String,
-    shell: ShellRunner,
+    terminal: TerminalRunner,
 }
 
 impl UiState {
     fn new(repo_root: PathBuf) -> Self {
         Self {
+            focus: Focus::LogInput,
             mode: InputMode::Normal,
             log_input: String::new(),
-            shell_input: String::new(),
-            shell: ShellRunner::new(repo_root),
+            terminal: TerminalRunner::new(repo_root),
         }
     }
 }
@@ -62,7 +67,6 @@ pub fn run(app: &mut AppState) -> io::Result<()> {
     res
 }
 
-
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut AppState,
@@ -74,14 +78,13 @@ fn run_loop(
         app.refresh_branch_if_needed();
         let branch_changed = prev_branch != app.current_branch;
 
-        // 브랜치가 바뀌면 입력 상태 취소
-        if branch_changed && matches!(ui.mode, InputMode::EditingLog | InputMode::EditingShell) {
+        // 브랜치가 바뀌면 로그 입력은 취소
+        if branch_changed && ui.mode == InputMode::EditingLog {
             ui.mode = InputMode::Normal;
             ui.log_input.clear();
-            ui.shell_input.clear();
         }
 
-        ui.shell.poll_output();
+        ui.terminal.poll_output();
 
         terminal.draw(|f| {
             let size = f.size();
@@ -94,7 +97,6 @@ fn run_loop(
                     Constraint::Length(3), // input
                 ])
                 .split(size);
-
 
             // 헤더
             let header = Paragraph::new(Line::from(vec![
@@ -119,15 +121,24 @@ fn run_loop(
 
             // 좌측: 터미널 출력
             let terminal_area = body[0];
-            let max_visible = terminal_area.height.saturating_sub(2).max(1) as usize;
-            let lines = ui.shell.recent_lines(max_visible.min(50));
-            let padding = max_visible.saturating_sub(lines.len());
-            let mut display_lines: Vec<Line> = Vec::with_capacity(max_visible);
+            let inner_height = terminal_area.height.saturating_sub(2).max(1) as usize;
+            let output_height = inner_height.saturating_sub(1); // 마지막 줄은 프롬프트
+            let lines = ui.terminal.visible_lines(output_height);
+            let padding = output_height.saturating_sub(lines.len());
+            let mut display_lines: Vec<Line> = Vec::with_capacity(output_height + 1);
             display_lines.extend(std::iter::repeat(Line::from("")).take(padding));
             display_lines.extend(lines.into_iter().map(Line::from));
 
+            let prompt = format!("> {}", ui.terminal.input);
+            display_lines.push(Line::from(prompt.clone()));
+
+            let title = match ui.focus {
+                Focus::Terminal => " Terminal (focus) ",
+                Focus::LogInput => " Terminal ",
+            };
+
             let left = Paragraph::new(display_lines)
-                .block(Block::default().borders(Borders::ALL).title(" Terminal "));
+                .block(Block::default().borders(Borders::ALL).title(title));
             f.render_widget(left, terminal_area);
 
             // 우측: 로그 리스트
@@ -152,89 +163,106 @@ fn run_loop(
                 List::new(items).block(Block::default().borders(Borders::ALL).title(" Logs "));
             f.render_widget(list, body[1]);
 
-            let input_block = Block::default().borders(Borders::ALL).title(match ui.mode {
-                InputMode::Normal => " Press i=log, :=shell, q=quit ",
-                InputMode::EditingLog => " Enter log (Enter=save, Esc=cancel) ",
-                InputMode::EditingShell => " Shell command (Enter=run, Esc=cancel) ",
-            });
+            let input_block =
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(match (ui.focus, ui.mode) {
+                        (Focus::LogInput, InputMode::EditingLog) => {
+                            " Enter log (Enter=save, Esc=cancel) "
+                        }
+                        (Focus::LogInput, InputMode::Normal) => {
+                            " Log input (press i to add, Tab=switch, q=quit) "
+                        }
+                        _ => " Log input (Tab to focus) ",
+                    });
 
-            let input_text = match ui.mode {
-                InputMode::EditingShell => ui.shell_input.as_str(),
-                _ => ui.log_input.as_str(),
-            };
+            let input_text = ui.log_input.as_str();
 
             let input = Paragraph::new(input_text).block(input_block);
 
             f.render_widget(input, chunks[2]);
 
-            if matches!(ui.mode, InputMode::EditingLog | InputMode::EditingShell) {
-                let cursor_pos = match ui.mode {
-                    InputMode::EditingShell => ui.shell_input.len(),
-                    _ => ui.log_input.len(),
-                };
+            if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
+                let cursor_pos = ui.log_input.len();
                 f.set_cursor(chunks[2].x + cursor_pos as u16 + 1, chunks[2].y + 1);
+            }
+
+            if ui.focus == Focus::Terminal {
+                let cursor_x = terminal_area.x + 2 + ui.terminal.input.len() as u16;
+                let cursor_y = terminal_area.y + terminal_area.height.saturating_sub(2);
+                f.set_cursor(cursor_x, cursor_y);
             }
         })?;
 
         // 키 입력
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                match ui.mode {
-                    InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('i') => {
-                            ui.mode = InputMode::EditingLog;
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Tab => {
+                        ui.focus = match ui.focus {
+                            Focus::Terminal => Focus::LogInput,
+                            Focus::LogInput => Focus::Terminal,
+                        };
+                        if ui.focus == Focus::Terminal && ui.mode == InputMode::EditingLog {
+                            ui.mode = InputMode::Normal;
                             ui.log_input.clear();
                         }
-                        KeyCode::Char(':') => {
-                            ui.mode = InputMode::EditingShell;
-                            ui.shell_input.clear();
-                        }
-                        _ => {}
-                    },
+                    }
+                    _ => {}
+                }
 
-                    InputMode::EditingLog => match key.code {
-                        KeyCode::Esc => {
-                            ui.mode = InputMode::Normal;
-                            ui.log_input.clear();
-                        }
+                match ui.focus {
+                    Focus::Terminal => match key.code {
                         KeyCode::Enter => {
-                            if !ui.log_input.trim().is_empty() {
-                                let _ = app
-                                    .log_store
-                                    .append_text(&app.current_branch, &ui.log_input);
+                            let cmd = ui.terminal.input.trim().to_string();
+                            if !cmd.is_empty() {
+                                ui.terminal.run_command(&cmd);
                             }
-                            ui.log_input.clear();
-                            ui.mode = InputMode::Normal;
+                            ui.terminal.input.clear();
                         }
                         KeyCode::Backspace => {
-                            ui.log_input.pop();
+                            ui.terminal.input.pop();
                         }
                         KeyCode::Char(c) => {
-                            ui.log_input.push(c);
+                            ui.terminal.input.push(c);
                         }
+                        KeyCode::Up => ui.terminal.scroll_up(1),
+                        KeyCode::Down => ui.terminal.scroll_down(1),
+                        KeyCode::PageUp => ui.terminal.scroll_up(10),
+                        KeyCode::PageDown => ui.terminal.scroll_down(10),
                         _ => {}
                     },
-
-                    InputMode::EditingShell => match key.code {
-                        KeyCode::Esc => {
-                            ui.mode = InputMode::Normal;
-                            ui.shell_input.clear();
-                        }
-                        KeyCode::Enter => {
-                            if !ui.shell_input.trim().is_empty() {
-                                ui.shell.run_command(ui.shell_input.clone());
+                    Focus::LogInput => match ui.mode {
+                        InputMode::Normal => match key.code {
+                            KeyCode::Char('i') => {
+                                ui.mode = InputMode::EditingLog;
+                                ui.log_input.clear();
                             }
-                            ui.shell_input.clear();
-                            ui.mode = InputMode::Normal;
-                        }
-                        KeyCode::Backspace => {
-                            ui.shell_input.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            ui.shell_input.push(c);
-                        }
-                        _ => {}
+                            _ => {}
+                        },
+                        InputMode::EditingLog => match key.code {
+                            KeyCode::Esc => {
+                                ui.mode = InputMode::Normal;
+                                ui.log_input.clear();
+                            }
+                            KeyCode::Enter => {
+                                if !ui.log_input.trim().is_empty() {
+                                    let _ = app
+                                        .log_store
+                                        .append_text(&app.current_branch, &ui.log_input);
+                                }
+                                ui.log_input.clear();
+                                ui.mode = InputMode::Normal;
+                            }
+                            KeyCode::Backspace => {
+                                ui.log_input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                ui.log_input.push(c);
+                            }
+                            _ => {}
+                        },
                     },
                 }
             }
