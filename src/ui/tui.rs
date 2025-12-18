@@ -4,7 +4,9 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -63,7 +65,7 @@ impl UiState {
 pub fn run(app: &mut AppState) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -72,7 +74,11 @@ pub fn run(app: &mut AppState) -> io::Result<()> {
     let res = run_loop(&mut terminal, app, &mut ui_state);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     res
@@ -246,59 +252,56 @@ fn run_loop(
 
         // 키 입력
         if event::poll(std::time::Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Tab => {
-                        ui.focus = match ui.focus {
-                            Focus::Terminal => Focus::LogInput,
-                            Focus::LogInput => Focus::Terminal,
-                        };
-                        if ui.focus == Focus::Terminal && ui.mode == InputMode::EditingLog {
-                            ui.mode = InputMode::Normal;
-                            ui.log_input.clear();
+            match event::read()? {
+                Event::Key(key) => {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Tab => {
+                            ui.focus = match ui.focus {
+                                Focus::Terminal => Focus::LogInput,
+                                Focus::LogInput => Focus::Terminal,
+                            };
+                            if ui.focus == Focus::Terminal && ui.mode == InputMode::EditingLog {
+                                ui.mode = InputMode::Normal;
+                                ui.log_input.clear();
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                }
 
-                match ui.focus {
-                    Focus::Terminal => match key.code {
-                        KeyCode::Enter => {
-                            let cmd = ui.terminal.input.trim().to_string();
-                            if !cmd.is_empty() {
-                                ui.terminal.run_command(&cmd);
-                                ui.history.push(cmd);
-                                ui.reset_history_pos();
-                            }
-                            ui.terminal.input.clear();
-                        }
-                        KeyCode::Backspace => {
-                            ui.terminal.input.pop();
-                            ui.reset_history_pos();
-                        }
-                        KeyCode::Char(c) => {
-                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                                ui.terminal.input.push(c);
-                                ui.reset_history_pos();
-                            }
-                        }
-                        KeyCode::Up => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                ui.terminal.scroll_up(5);
-                            } else if !ui.history.is_empty() {
-                                if ui.history_index == ui.history.len() && !ui.history.is_empty() {
-                                    ui.history_index = ui.history.len().saturating_sub(1);
-                                } else if ui.history_index > 0 {
-                                    ui.history_index -= 1;
+                    match ui.focus {
+                        Focus::Terminal => match key.code {
+                            KeyCode::Enter => {
+                                let cmd = ui.terminal.input.trim().to_string();
+                                if !cmd.is_empty() {
+                                    ui.terminal.run_command(&cmd);
+                                    ui.history.push(cmd);
+                                    ui.reset_history_pos();
                                 }
-                                ui.terminal.input = ui.history[ui.history_index].clone();
+                                ui.terminal.input.clear();
                             }
-                        }
-                        KeyCode::Down => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                ui.terminal.scroll_down(5);
-                            } else {
+                            KeyCode::Backspace => {
+                                ui.terminal.input.pop();
+                                ui.reset_history_pos();
+                            }
+                            KeyCode::Char(c) => {
+                                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+                                {
+                                    ui.terminal.input.push(c);
+                                    ui.reset_history_pos();
+                                }
+                            }
+                            KeyCode::Up => {
+                                if !ui.history.is_empty() {
+                                    if ui.history_index == ui.history.len() {
+                                        ui.history_index = ui.history.len().saturating_sub(1);
+                                    } else if ui.history_index > 0 {
+                                        ui.history_index -= 1;
+                                    }
+                                    ui.terminal.input = ui.history[ui.history_index].clone();
+                                }
+                            }
+                            KeyCode::Down => {
                                 if ui.history_index + 1 < ui.history.len() {
                                     ui.history_index += 1;
                                     ui.terminal.input = ui.history[ui.history_index].clone();
@@ -307,43 +310,49 @@ fn run_loop(
                                     ui.terminal.input.clear();
                                 }
                             }
-                        }
-                        KeyCode::PageUp => ui.terminal.scroll_up(10),
-                        KeyCode::PageDown => ui.terminal.scroll_down(10),
-                        _ => {}
-                    },
-                    Focus::LogInput => match ui.mode {
-                        InputMode::Normal => match key.code {
-                            KeyCode::Char('i') => {
-                                ui.mode = InputMode::EditingLog;
-                                ui.log_input.clear();
-                            }
+                            KeyCode::PageUp => ui.terminal.scroll_up(10),
+                            KeyCode::PageDown => ui.terminal.scroll_down(10),
                             _ => {}
                         },
-                        InputMode::EditingLog => match key.code {
-                            KeyCode::Esc => {
-                                ui.mode = InputMode::Normal;
-                                ui.log_input.clear();
-                            }
-                            KeyCode::Enter => {
-                                if !ui.log_input.trim().is_empty() {
-                                    let _ = app
-                                        .log_store
-                                        .append_text(&app.current_branch, &ui.log_input);
+                        Focus::LogInput => match ui.mode {
+                            InputMode::Normal => match key.code {
+                                KeyCode::Char('i') => {
+                                    ui.mode = InputMode::EditingLog;
+                                    ui.log_input.clear();
                                 }
-                                ui.log_input.clear();
-                                ui.mode = InputMode::Normal;
-                            }
-                            KeyCode::Backspace => {
-                                ui.log_input.pop();
-                            }
-                            KeyCode::Char(c) => {
-                                ui.log_input.push(c);
-                            }
-                            _ => {}
+                                _ => {}
+                            },
+                            InputMode::EditingLog => match key.code {
+                                KeyCode::Esc => {
+                                    ui.mode = InputMode::Normal;
+                                    ui.log_input.clear();
+                                }
+                                KeyCode::Enter => {
+                                    if !ui.log_input.trim().is_empty() {
+                                        let _ = app
+                                            .log_store
+                                            .append_text(&app.current_branch, &ui.log_input);
+                                    }
+                                    ui.log_input.clear();
+                                    ui.mode = InputMode::Normal;
+                                }
+                                KeyCode::Backspace => {
+                                    ui.log_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    ui.log_input.push(c);
+                                }
+                                _ => {}
+                            },
                         },
-                    },
+                    }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => ui.terminal.scroll_up(3),
+                    MouseEventKind::ScrollDown => ui.terminal.scroll_down(3),
+                    _ => {}
+                },
+                _ => {}
             }
         }
     }

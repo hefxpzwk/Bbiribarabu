@@ -96,21 +96,34 @@ impl TerminalRunner {
                 for line in reader.lines().flatten() {
                     let _ = tx.send(OutputLine {
                         kind: OutputKind::Stderr,
-                        text: line,
+                        text: format!("[error] {}", line),
                     });
                 }
             });
         }
 
+        let mut first_command = true;
         while let Ok(cmd) = rx_cmd.recv() {
             let trimmed = cmd.trim();
             if trimmed.is_empty() {
                 continue;
             }
 
+            if !first_command {
+                let _ = tx_out.send(OutputLine {
+                    kind: OutputKind::Info,
+                    text: String::new(),
+                });
+            }
+            first_command = false;
+
             let _ = tx_out.send(OutputLine {
                 kind: OutputKind::Command,
                 text: format!("$ {}", trimmed),
+            });
+            let _ = tx_out.send(OutputLine {
+                kind: OutputKind::Info,
+                text: "--------------------------------".into(),
             });
 
             match child.stdin.as_mut() {
@@ -151,7 +164,9 @@ impl TerminalRunner {
         if trimmed.is_empty() {
             return;
         }
-        self.scroll = 0;
+        if self.scroll == 0 {
+            self.scroll = 0; // keep at bottom
+        }
         let _ = self.tx_cmd.send(trimmed.to_string());
     }
 
