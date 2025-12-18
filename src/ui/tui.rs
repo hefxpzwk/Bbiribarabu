@@ -4,7 +4,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -38,6 +38,8 @@ struct UiState {
     focus: Focus,
     mode: InputMode,
     log_input: String,
+    history: Vec<String>,
+    history_index: usize,
     terminal: TerminalRunner,
 }
 
@@ -47,8 +49,14 @@ impl UiState {
             focus: Focus::Terminal,
             mode: InputMode::Normal,
             log_input: String::new(),
+            history: Vec::new(),
+            history_index: 0,
             terminal: TerminalRunner::new(repo_root),
         }
+    }
+
+    fn reset_history_pos(&mut self) {
+        self.history_index = self.history.len();
     }
 }
 
@@ -140,11 +148,13 @@ fn run_loop(
             display_lines.extend(std::iter::repeat(Line::from("")).take(padding));
             display_lines.extend(lines.into_iter().map(|l| {
                 let style = match l.kind {
-                    OutputKind::Command => Style::default().add_modifier(Modifier::BOLD),
+                    OutputKind::Command => Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                     OutputKind::Stderr => Style::default().fg(Color::Red),
-                    OutputKind::Info => {
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::DIM)
-                    }
+                    OutputKind::Info => Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::DIM | Modifier::ITALIC),
                     OutputKind::Stdout => Style::default(),
                 };
                 Line::from(Span::styled(l.text, style))
@@ -258,17 +268,46 @@ fn run_loop(
                             let cmd = ui.terminal.input.trim().to_string();
                             if !cmd.is_empty() {
                                 ui.terminal.run_command(&cmd);
+                                ui.history.push(cmd);
+                                ui.reset_history_pos();
                             }
                             ui.terminal.input.clear();
                         }
                         KeyCode::Backspace => {
                             ui.terminal.input.pop();
+                            ui.reset_history_pos();
                         }
                         KeyCode::Char(c) => {
-                            ui.terminal.input.push(c);
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+                                ui.terminal.input.push(c);
+                                ui.reset_history_pos();
+                            }
                         }
-                        KeyCode::Up => ui.terminal.scroll_up(1),
-                        KeyCode::Down => ui.terminal.scroll_down(1),
+                        KeyCode::Up => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                ui.terminal.scroll_up(5);
+                            } else if !ui.history.is_empty() {
+                                if ui.history_index == ui.history.len() && !ui.history.is_empty() {
+                                    ui.history_index = ui.history.len().saturating_sub(1);
+                                } else if ui.history_index > 0 {
+                                    ui.history_index -= 1;
+                                }
+                                ui.terminal.input = ui.history[ui.history_index].clone();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                ui.terminal.scroll_down(5);
+                            } else {
+                                if ui.history_index + 1 < ui.history.len() {
+                                    ui.history_index += 1;
+                                    ui.terminal.input = ui.history[ui.history_index].clone();
+                                } else {
+                                    ui.history_index = ui.history.len();
+                                    ui.terminal.input.clear();
+                                }
+                            }
+                        }
                         KeyCode::PageUp => ui.terminal.scroll_up(10),
                         KeyCode::PageDown => ui.terminal.scroll_down(10),
                         _ => {}
