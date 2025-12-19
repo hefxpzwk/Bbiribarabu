@@ -216,14 +216,18 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
+                    if key.code == KeyCode::Esc
+                        && !(ui.focus == Focus::LogInput && ui.mode == InputMode::EditingLog)
+                    {
+                        ui.focus = match ui.focus {
+                            Focus::Terminal => Focus::LogInput,
+                            Focus::LogInput => Focus::Terminal,
+                        };
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char('q') if ui.focus == Focus::Terminal => break,
-                        KeyCode::Tab => {
-                            ui.focus = match ui.focus {
-                                Focus::Terminal => Focus::LogInput,
-                                Focus::LogInput => Focus::Terminal,
-                            };
-                        }
                         KeyCode::F(2) => {
                             ui.debug_overlay = !ui.debug_overlay;
                         }
