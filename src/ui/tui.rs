@@ -106,7 +106,7 @@ fn run_loop(
             ui.log_input.clear();
         }
         if let Some((_, at)) = ui.status_message.as_ref() {
-            if at.elapsed() > Duration::from_secs(2) {
+            if ui.voice_recording.is_none() && at.elapsed() > Duration::from_secs(2) {
                 ui.status_message = None;
             }
         }
@@ -212,13 +212,15 @@ fn run_loop(
                             " Enter log (Enter=save, Esc=cancel) "
                         }
                         (Focus::LogInput, InputMode::Normal) => {
-                            " Log input (press i to add, v=voice, Tab=switch, q=quit) "
+                            " Log input (press i to add, v=voice, Esc=switch, q=quit) "
                         }
-                        _ => " Log input (Tab to focus) ",
+                        _ => " Log input (Esc to focus) ",
                     });
 
             let input_text = if matches!(ui.mode, InputMode::EditingLog) {
                 ui.log_input.as_str()
+            } else if ui.voice_recording.is_some() {
+                "녹음중... 다시 v로 종료"
             } else if let Some((ref msg, _)) = ui.status_message {
                 msg.as_str()
             } else {
@@ -247,7 +249,7 @@ fn run_loop(
                     }
 
                     match key.code {
-                        KeyCode::Char('q') if ui.focus == Focus::Terminal => break,
+                        KeyCode::Char('q') if ui.focus == Focus::LogInput => break,
                         KeyCode::F(2) => {
                             ui.debug_overlay = !ui.debug_overlay;
                         }
