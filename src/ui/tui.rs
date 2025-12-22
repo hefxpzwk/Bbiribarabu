@@ -17,6 +17,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::AppState,
@@ -230,8 +231,13 @@ fn run_loop(
             f.render_widget(input, layout.input);
 
             if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
-                let cursor_pos = ui.log_input.len();
-                f.set_cursor(layout.input.x + cursor_pos as u16 + 1, layout.input.y + 1);
+                let inner_width = layout.input.width.saturating_sub(2);
+                if inner_width > 0 {
+                    let width = ui.log_input.as_str().width();
+                    let max_col = usize::from(inner_width.saturating_sub(1));
+                    let cursor_col = width.min(max_col);
+                    f.set_cursor(layout.input.x + cursor_col as u16 + 1, layout.input.y + 1);
+                }
             }
         })?;
 
