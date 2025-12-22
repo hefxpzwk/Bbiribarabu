@@ -1,7 +1,7 @@
 use std::{
     io::{self, Stdout},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::{
@@ -21,6 +21,7 @@ use ratatui::{
 use crate::{
     app::AppState,
     ui::pty_terminal::{PtyTerminal, encode_key_event},
+    voice,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -41,6 +42,8 @@ struct UiState {
     log_input: String,
     pty: PtyTerminal,
     debug_overlay: bool,
+    status_message: Option<(String, Instant)>,
+    voice_recording: Option<voice::VoiceRecording>,
 }
 
 impl UiState {
@@ -51,7 +54,13 @@ impl UiState {
             log_input: String::new(),
             pty: PtyTerminal::spawn(repo_root, rows, cols)?,
             debug_overlay: false,
+            status_message: None,
+            voice_recording: None,
         })
+    }
+
+    fn set_status(&mut self, message: impl Into<String>) {
+        self.status_message = Some((message.into(), Instant::now()));
     }
 }
 
@@ -95,6 +104,11 @@ fn run_loop(
         if prev_branch != app.current_branch && ui.mode == InputMode::EditingLog {
             ui.mode = InputMode::Normal;
             ui.log_input.clear();
+        }
+        if let Some((_, at)) = ui.status_message.as_ref() {
+            if at.elapsed() > Duration::from_secs(2) {
+                ui.status_message = None;
+            }
         }
 
         let layout = compute_layout(terminal.size()?);
@@ -198,12 +212,18 @@ fn run_loop(
                             " Enter log (Enter=save, Esc=cancel) "
                         }
                         (Focus::LogInput, InputMode::Normal) => {
-                            " Log input (press i to add, Tab=switch, q=quit) "
+                            " Log input (press i to add, v=voice, Tab=switch, q=quit) "
                         }
                         _ => " Log input (Tab to focus) ",
                     });
 
-            let input_text = ui.log_input.as_str();
+            let input_text = if matches!(ui.mode, InputMode::EditingLog) {
+                ui.log_input.as_str()
+            } else if let Some((ref msg, _)) = ui.status_message {
+                msg.as_str()
+            } else {
+                ""
+            };
             let input = Paragraph::new(input_text).block(input_block);
             f.render_widget(input, layout.input);
 
@@ -245,6 +265,49 @@ fn run_loop(
                                 KeyCode::Char('i') => {
                                     ui.mode = InputMode::EditingLog;
                                     ui.log_input.clear();
+                                }
+                                KeyCode::Char('v') => {
+                                    if ui.voice_recording.is_none() {
+                                        match voice::start_recording() {
+                                            Ok(rec) => {
+                                                ui.voice_recording = Some(rec);
+                                                ui.set_status("녹음중... 다시 v로 종료");
+                                            }
+                                            Err(e) => {
+                                                ui.set_status(format!("녹음 시작 실패: {}", e));
+                                            }
+                                        }
+                                    } else if let Some(rec) = ui.voice_recording.take() {
+                                        let model_path = std::env::var("WHISPER_MODEL")
+                                            .unwrap_or_else(|_| "models/ggml-tiny.bin".to_string());
+                                        let (audio, rate, channels) = rec.stop();
+                                        match voice::transcribe_audio(
+                                            &model_path,
+                                            audio,
+                                            rate,
+                                            channels,
+                                        ) {
+                                            Ok(t) => {
+                                                let trimmed = t.trim();
+                                                if trimmed.is_empty() {
+                                                    ui.set_status("보이스 인식 결과 없음");
+                                                } else if let Err(e) = app
+                                                    .log_store
+                                                    .append_text(&app.current_branch, trimmed)
+                                                {
+                                                    ui.set_status(format!(
+                                                        "보이스 로그 실패: {}",
+                                                        e
+                                                    ));
+                                                } else {
+                                                    ui.set_status("보이스 로그 추가됨");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                ui.set_status(format!("보이스 인식 실패: {}", e));
+                                            }
+                                        }
+                                    }
                                 }
                                 _ => {}
                             },
