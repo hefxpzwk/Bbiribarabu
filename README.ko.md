@@ -8,6 +8,23 @@ Bbiribarabu는 Git 레포지토리에서 브랜치별로 로그를 남기는 기
 - CLI로 로그 추가/조회/음성 기록
 - 필요한 경우 Whisper 모델을 자동 다운로드
 
+## 다운로드 및 설치
+
+### 사전 빌드 바이너리 (권장)
+
+GitHub Releases에서 **Linux x86_64 실행 파일**을 다운로드할 수 있습니다.
+
+https://github.com/hefxpzwk/Bbiribarabu/releases
+
+### 명령어로 빠르게 설치하려면:
+
+```bash
+curl -L -o Bbiribarabu \
+https://github.com/hefxpzwk/Bbiribarabu/releases/download/v1.0.0/Bbiribarabu
+
+chmod +x Bbiribarabu
+./Bbiribarabu
+```
 ## 요구 사항
 - Rust toolchain (edition 2024)
 - Git 레포지토리 내부에서 실행
