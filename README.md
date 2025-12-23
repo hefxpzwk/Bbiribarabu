@@ -11,6 +11,23 @@ Bbiribarabu is a branch-scoped logbook for Git repositories. It keeps quick note
 - CLI for add/list/voice logging
 - Voice transcription with on-demand Whisper model download
 
+## Download & Install
+
+### Prebuilt binary (recommended)
+
+Download the Linux x86_64 binary from GitHub Releases:
+
+https://github.com/hefxpzwk/Bbiribarabu/releases
+
+Quick install via command line:
+
+```bash
+curl -L -o Bbiribarabu \
+https://github.com/hefxpzwk/Bbiribarabu/releases/download/v1.0.0/Bbiribarabu
+
+chmod +x Bbiribarabu
+./Bbiribarabu
+
 ## Requirements
 
 - Rust toolchain (edition 2024)
