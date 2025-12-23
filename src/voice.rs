@@ -1,4 +1,9 @@
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{
+    Arc,
+    Mutex,
+    Once,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -27,6 +32,9 @@ pub struct VadConfig {
     pub max_record_ms: u32,
 }
 
+pub const RECORD_SIGNAL_STOP: u8 = 1;
+pub const RECORD_SIGNAL_CANCEL: u8 = 2;
+
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
@@ -46,13 +54,21 @@ pub fn transcribe_from_mic(duration: Duration, model_path: &str) -> Result<Strin
     let recorder = start_recording()?;
     let start = Instant::now();
     while start.elapsed() < duration {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(10));
     }
     let (audio, input_rate, channels) = recorder.stop();
     transcribe_audio(model_path, audio, input_rate, channels)
 }
 
 pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<String, String> {
+    transcribe_from_mic_vad_with_cancel(model_path, config, None)
+}
+
+pub fn transcribe_from_mic_vad_with_cancel(
+    model_path: &str,
+    config: VadConfig,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     silence_whisper_logs();
     let recorder = start_recording()?;
     let start = Instant::now();
@@ -73,6 +89,15 @@ pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<St
     let mut silence_ms = 0u32;
     let mut speech_start = 0usize;
     let speech_end = loop {
+        if cancel
+            .as_ref()
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            drop(recorder);
+            return Err("녹음이 취소되었습니다".to_string());
+        }
+
         if start.elapsed() > Duration::from_millis(config.max_record_ms as u64) {
             if speaking {
                 let data = recorder.buffer.lock().unwrap();
@@ -123,6 +148,15 @@ pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<St
         processed = frame_end;
     };
 
+    if cancel
+        .as_ref()
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+    {
+        drop(recorder);
+        return Err("녹음이 취소되었습니다".to_string());
+    }
+
     let mut data = recorder.buffer.lock().unwrap().clone();
     let sample_rate = recorder.sample_rate;
     let channels = recorder.channels;
@@ -134,6 +168,27 @@ pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<St
 
     let audio = data.drain(speech_start..speech_end).collect::<Vec<_>>();
     transcribe_audio(model_path, audio, sample_rate, channels)
+}
+
+pub fn transcribe_from_mic_until_signal(
+    model_path: &str,
+    signal: Arc<AtomicU8>,
+) -> Result<String, String> {
+    silence_whisper_logs();
+    let recorder = start_recording()?;
+    loop {
+        let state = signal.load(Ordering::Relaxed);
+        if state != 0 {
+            if state == RECORD_SIGNAL_CANCEL {
+                drop(recorder);
+                return Err("녹음이 취소되었습니다".to_string());
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (audio, input_rate, channels) = recorder.stop();
+    transcribe_audio(model_path, audio, input_rate, channels)
 }
 
 pub fn start_recording() -> Result<VoiceRecording, String> {

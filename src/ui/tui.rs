@@ -1,7 +1,11 @@
 use std::{
     io::{self, Stdout},
     path::PathBuf,
-    sync::mpsc::{self, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+        mpsc::{self, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 
@@ -40,6 +44,11 @@ enum InputMode {
     Searching,
 }
 
+enum VoiceEvent {
+    Status(String),
+    Result(Result<String, String>),
+}
+
 struct UiState {
     focus: Focus,
     mode: InputMode,
@@ -47,8 +56,10 @@ struct UiState {
     input_cursor: usize,
     pty: PtyTerminal,
     debug_overlay: bool,
-    status_message: Option<(String, Instant)>,
-    voice_task: Option<mpsc::Receiver<Result<String, String>>>,
+    status_message: Option<(String, Instant, Duration)>,
+    voice_task: Option<mpsc::Receiver<VoiceEvent>>,
+    voice_signal: Option<Arc<AtomicU8>>,
+    voice_stopping: bool,
     log_scroll_y: usize,
     log_scroll_x: usize,
     input_scroll_x: usize,
@@ -70,6 +81,8 @@ impl UiState {
             debug_overlay: false,
             status_message: None,
             voice_task: None,
+            voice_signal: None,
+            voice_stopping: false,
             log_scroll_y: 0,
             log_scroll_x: 0,
             input_scroll_x: 0,
@@ -82,7 +95,11 @@ impl UiState {
     }
 
     fn set_status(&mut self, message: impl Into<String>) {
-        self.status_message = Some((message.into(), Instant::now()));
+        self.set_status_for(message, Duration::from_secs(2));
+    }
+
+    fn set_status_for(&mut self, message: impl Into<String>, duration: Duration) {
+        self.status_message = Some((message.into(), Instant::now(), duration));
     }
 }
 
@@ -133,8 +150,8 @@ fn run_loop(
         if prev_branch != app.current_branch && ui.mode == InputMode::ConfirmDelete {
             ui.mode = InputMode::Normal;
         }
-        if let Some((_, at)) = ui.status_message.as_ref() {
-            if ui.voice_task.is_none() && at.elapsed() > Duration::from_secs(2) {
+        if let Some((_, at, duration)) = ui.status_message.as_ref() {
+            if at.elapsed() > *duration {
                 ui.status_message = None;
             }
         }
@@ -192,8 +209,19 @@ fn run_loop(
 
         if let Some(rx) = ui.voice_task.as_ref() {
             match rx.try_recv() {
-                Ok(result) => {
+                Ok(VoiceEvent::Status(msg)) => {
+                    if msg.contains("다운로드합니다") {
+                        ui.set_status_for(msg, Duration::from_secs(300));
+                    } else if msg.contains("다운로드 완료") {
+                        ui.set_status_for(msg, Duration::from_secs(2));
+                    } else {
+                        ui.set_status(msg);
+                    }
+                }
+                Ok(VoiceEvent::Result(result)) => {
                     ui.voice_task = None;
+                    ui.voice_signal = None;
+                    ui.voice_stopping = false;
                     match result {
                         Ok(t) => {
                             let trimmed = t.trim();
@@ -204,17 +232,27 @@ fn run_loop(
                             {
                                 ui.set_status(format!("보이스 로그 실패: {}", e));
                             } else {
-                                ui.set_status("보이스 로그 추가됨");
+                                ui.set_status("로그 저장되었습니다");
                             }
                         }
                         Err(e) => {
-                            ui.set_status(format!("보이스 인식 실패: {}", e));
+                            if e == "녹음이 취소되었습니다" {
+                                ui.set_status("녹음 취소됨");
+                                continue;
+                            }
+                            if e.starts_with("모델 준비 실패:") {
+                                ui.set_status_for(e, Duration::from_secs(6));
+                            } else {
+                                ui.set_status(format!("보이스 인식 실패: {}", e));
+                            }
                         }
                     }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     ui.voice_task = None;
+                    ui.voice_signal = None;
+                    ui.voice_stopping = false;
                     ui.set_status("보이스 인식 실패");
                 }
             }
@@ -365,10 +403,10 @@ fn run_loop(
                     None,
                 ),
                 _ => {
-                    if ui.voice_task.is_some() {
-                        ("녹음중... 멈추면 자동 종료".to_string(), None)
-                    } else if let Some((ref msg, _)) = ui.status_message {
+                    if let Some((ref msg, _, _)) = ui.status_message {
                         (msg.clone(), None)
+                    } else if ui.voice_task.is_some() && !ui.voice_stopping {
+                        ("녹음중... v 누르면 종료".to_string(), None)
                     } else {
                         (String::new(), None)
                     }
@@ -389,6 +427,26 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
+                    if ui.voice_task.is_some() {
+                        if let Some(signal) = ui.voice_signal.as_ref() {
+                            let value = if key.code == KeyCode::Char('v') {
+                                voice::RECORD_SIGNAL_STOP
+                            } else {
+                                voice::RECORD_SIGNAL_CANCEL
+                            };
+                            let was_set = signal.swap(value, Ordering::Relaxed);
+                            if was_set == 0 && value == voice::RECORD_SIGNAL_CANCEL {
+                                ui.set_status("녹음 취소됨");
+                            }
+                            if was_set == 0 && value == voice::RECORD_SIGNAL_STOP {
+                                ui.voice_stopping = true;
+                                ui.set_status_for("로그 저장중입니다", Duration::from_secs(300));
+                            }
+                        }
+                        if key.code == KeyCode::Char('v') {
+                            continue;
+                        }
+                    }
                     if ui.mode == InputMode::ConfirmDelete {
                         match key.code {
                             KeyCode::Char('y') => {
@@ -503,26 +561,54 @@ fn run_loop(
                                 }
                                 KeyCode::Char('v') => {
                                     if ui.voice_task.is_none() {
-                                        let model_path = match voice::model::prepare_model_path() {
-                                            Ok(path) => path,
-                                            Err(err) => {
-                                                ui.set_status(&format!(
+                                        let (tx, rx) = mpsc::channel::<VoiceEvent>();
+                                        let signal = Arc::new(AtomicU8::new(0));
+                                        ui.voice_task = Some(rx);
+                                        ui.voice_signal = Some(signal.clone());
+                                        std::thread::spawn(move || {
+                                            let status_tx = tx.clone();
+                                            let result = match voice::model::prepare_model_path_with_status(
+                                                |msg| {
+                                                    let _ = status_tx.send(VoiceEvent::Status(
+                                                        msg.to_string(),
+                                                    ));
+                                                },
+                                            ) {
+                                                Ok(model) => {
+                                                    if signal.load(Ordering::Relaxed)
+                                                        == voice::RECORD_SIGNAL_CANCEL
+                                                    {
+                                                        Err("녹음이 취소되었습니다".to_string())
+                                                    } else {
+                                                        if model.downloaded {
+                                                            std::thread::sleep(
+                                                                Duration::from_millis(900),
+                                                            );
+                                                        }
+                                                        if signal.load(Ordering::Relaxed)
+                                                            == voice::RECORD_SIGNAL_CANCEL
+                                                        {
+                                                            Err(
+                                                                "녹음이 취소되었습니다".to_string()
+                                                            )
+                                                        } else {
+                                                            let _ = tx.send(VoiceEvent::Status(
+                                                                "녹음중... v 누르면 종료"
+                                                                    .to_string(),
+                                                            ));
+                                                            voice::transcribe_from_mic_until_signal(
+                                                                &model.path,
+                                                                signal,
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => Err(format!(
                                                     "모델 준비 실패: {}",
                                                     err
-                                                ));
-                                                continue;
-                                            }
-                                        };
-                                        let (tx, rx) =
-                                            mpsc::channel::<Result<String, String>>();
-                                        ui.voice_task = Some(rx);
-                                        ui.set_status("녹음중... 멈추면 자동 종료");
-
-                                        std::thread::spawn(move || {
-                                            let config = voice::VadConfig::default();
-                                            let result =
-                                                voice::transcribe_from_mic_vad(&model_path, config);
-                                            let _ = tx.send(result);
+                                                )),
+                                            };
+                                            let _ = tx.send(VoiceEvent::Result(result));
                                         });
                                     }
                                 }

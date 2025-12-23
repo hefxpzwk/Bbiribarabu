@@ -63,14 +63,17 @@ fn main() {
         }
 
         Some(Commands::Voice { seconds }) => {
-            let model_path = voice::model::prepare_model_path().unwrap_or_else(|e| {
+            let model = voice::model::prepare_model_path_with_status(|msg| {
+                println!("{}", msg);
+            })
+            .unwrap_or_else(|e| {
                 eprintln!("모델 준비 실패: {}", e);
                 std::process::exit(1);
             });
 
             let mut config = voice::VadConfig::default();
             config.max_record_ms = (seconds.max(1) as u32) * 1000;
-            let text = voice::transcribe_from_mic_vad(&model_path, config)
+            let text = voice::transcribe_from_mic_vad(&model.path, config)
                 .unwrap_or_else(|e| {
                     eprintln!("보이스 인식 실패: {}", e);
                     std::process::exit(1);
