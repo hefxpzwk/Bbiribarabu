@@ -5,7 +5,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -17,7 +17,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::AppState,
@@ -41,10 +41,14 @@ struct UiState {
     focus: Focus,
     mode: InputMode,
     log_input: String,
+    input_cursor: usize,
     pty: PtyTerminal,
     debug_overlay: bool,
     status_message: Option<(String, Instant)>,
     voice_recording: Option<voice::VoiceRecording>,
+    log_scroll_y: usize,
+    log_scroll_x: usize,
+    input_scroll_x: usize,
 }
 
 impl UiState {
@@ -53,10 +57,14 @@ impl UiState {
             focus: Focus::Terminal,
             mode: InputMode::Normal,
             log_input: String::new(),
+            input_cursor: 0,
             pty: PtyTerminal::spawn(repo_root, rows, cols)?,
             debug_overlay: false,
             status_message: None,
             voice_recording: None,
+            log_scroll_y: 0,
+            log_scroll_x: 0,
+            input_scroll_x: 0,
         })
     }
 
@@ -105,6 +113,8 @@ fn run_loop(
         if prev_branch != app.current_branch && ui.mode == InputMode::EditingLog {
             ui.mode = InputMode::Normal;
             ui.log_input.clear();
+            ui.input_cursor = 0;
+            ui.input_scroll_x = 0;
         }
         if let Some((_, at)) = ui.status_message.as_ref() {
             if ui.voice_recording.is_none() && at.elapsed() > Duration::from_secs(2) {
@@ -113,9 +123,28 @@ fn run_loop(
         }
 
         let layout = compute_layout(terminal.size()?);
+        let input_inner_width = layout.input.width.saturating_sub(2) as usize;
         ui.pty
             .ensure_size(layout.term_inner.height, layout.term_inner.width);
         ui.pty.poll_output();
+
+        let log_items = app
+            .log_store
+            .list(&app.current_branch)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .map(|it| format!("[{}] {}", it.created_at.format("%m-%d %H:%M"), it.text))
+            .collect::<Vec<_>>();
+        let log_inner_height = layout.logs.height.saturating_sub(2) as usize;
+        if log_inner_height > 0 {
+            let max_start = log_items.len().saturating_sub(log_inner_height);
+            if ui.log_scroll_y > max_start {
+                ui.log_scroll_y = max_start;
+            }
+        } else {
+            ui.log_scroll_y = 0;
+        }
 
         terminal.draw(|f| {
             let layout = compute_layout(f.size());
@@ -147,7 +176,6 @@ fn run_loop(
             let display_lines = ui.pty.lines();
             let paragraph = Paragraph::new(
                 display_lines
-                    .clone()
                     .into_iter()
                     .map(Line::from)
                     .collect::<Vec<_>>(),
@@ -184,20 +212,14 @@ fn run_loop(
             }
 
             // Logs
-            let items = app
-                .log_store
-                .list(&app.current_branch)
-                .unwrap_or_default()
-                .into_iter()
-                .rev()
-                .map(|it| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("[{}] ", it.created_at.format("%m-%d %H:%M")),
-                            Style::default().add_modifier(Modifier::DIM),
-                        ),
-                        Span::raw(it.text),
-                    ]))
+            let log_inner_width = layout.logs.width.saturating_sub(2) as usize;
+            let start = ui.log_scroll_y.min(log_items.len());
+            let end = (start + log_inner_height).min(log_items.len());
+            let items = log_items[start..end]
+                .iter()
+                .map(|line| {
+                    let sliced = slice_from_col(line, ui.log_scroll_x, log_inner_width);
+                    ListItem::new(Line::from(Span::raw(sliced)))
                 })
                 .collect::<Vec<_>>();
             let log_block =
@@ -218,25 +240,35 @@ fn run_loop(
                         _ => " Log input (Esc to focus) ",
                     });
 
-            let input_text = if matches!(ui.mode, InputMode::EditingLog) {
-                ui.log_input.as_str()
+            let (input_text, cursor_col) = if matches!(ui.mode, InputMode::EditingLog) {
+                if input_inner_width == 0 {
+                    (String::new(), None)
+                } else {
+                    let width = ui.log_input.as_str().width();
+                    let cursor_width = width_upto_char(&ui.log_input, ui.input_cursor);
+                    let max_visible = input_inner_width.saturating_sub(1);
+                    let max_start = width.saturating_sub(max_visible);
+                    if ui.input_scroll_x > max_start {
+                        ui.input_scroll_x = max_start;
+                    }
+                    let sliced =
+                        slice_from_col(&ui.log_input, ui.input_scroll_x, input_inner_width);
+                    let cursor = cursor_width.saturating_sub(ui.input_scroll_x).min(max_visible);
+                    (sliced, Some(cursor as u16))
+                }
             } else if ui.voice_recording.is_some() {
-                "녹음중... 다시 v로 종료"
+                ("녹음중... 다시 v로 종료".to_string(), None)
             } else if let Some((ref msg, _)) = ui.status_message {
-                msg.as_str()
+                (msg.clone(), None)
             } else {
-                ""
+                (String::new(), None)
             };
             let input = Paragraph::new(input_text).block(input_block);
             f.render_widget(input, layout.input);
 
             if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
-                let inner_width = layout.input.width.saturating_sub(2);
-                if inner_width > 0 {
-                    let width = ui.log_input.as_str().width();
-                    let max_col = usize::from(inner_width.saturating_sub(1));
-                    let cursor_col = width.min(max_col);
-                    f.set_cursor(layout.input.x + cursor_col as u16 + 1, layout.input.y + 1);
+                if let Some(col) = cursor_col {
+                    f.set_cursor(layout.input.x + col + 1, layout.input.y + 1);
                 }
             }
         })?;
@@ -264,8 +296,20 @@ fn run_loop(
 
                     match ui.focus {
                         Focus::Terminal => {
-                            if let Some(bytes) = encode_key_event(key) {
-                                ui.pty.send_bytes(&bytes);
+                            match key.code {
+                                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    ui.pty.scroll_up(1);
+                                }
+                                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    ui.pty.scroll_down(1);
+                                }
+                                KeyCode::PageUp => ui.pty.scroll_up(5),
+                                KeyCode::PageDown => ui.pty.scroll_down(5),
+                                _ => {
+                                    if let Some(bytes) = encode_key_event(key) {
+                                        ui.pty.send_bytes(&bytes);
+                                    }
+                                }
                             }
                         }
                         Focus::LogInput => match ui.mode {
@@ -273,6 +317,8 @@ fn run_loop(
                                 KeyCode::Char('i') => {
                                     ui.mode = InputMode::EditingLog;
                                     ui.log_input.clear();
+                                    ui.input_cursor = 0;
+                                    ui.input_scroll_x = 0;
                                 }
                                 KeyCode::Char('v') => {
                                     if ui.voice_recording.is_none() {
@@ -317,12 +363,35 @@ fn run_loop(
                                         }
                                     }
                                 }
+                                KeyCode::Up => {
+                                    ui.log_scroll_y = ui.log_scroll_y.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    ui.log_scroll_y = ui.log_scroll_y.saturating_add(1);
+                                }
+                                KeyCode::PageUp => {
+                                    ui.log_scroll_y = ui.log_scroll_y.saturating_sub(5);
+                                }
+                                KeyCode::PageDown => {
+                                    ui.log_scroll_y = ui.log_scroll_y.saturating_add(5);
+                                }
+                                KeyCode::Left => {
+                                    ui.log_scroll_x = ui.log_scroll_x.saturating_sub(4);
+                                }
+                                KeyCode::Right => {
+                                    ui.log_scroll_x = ui.log_scroll_x.saturating_add(4);
+                                }
+                                KeyCode::Home => {
+                                    ui.log_scroll_x = 0;
+                                }
                                 _ => {}
                             },
                             InputMode::EditingLog => match key.code {
                                 KeyCode::Esc => {
                                     ui.mode = InputMode::Normal;
                                     ui.log_input.clear();
+                                    ui.input_cursor = 0;
+                                    ui.input_scroll_x = 0;
                                 }
                                 KeyCode::Enter => {
                                     if !ui.log_input.trim().is_empty() {
@@ -332,12 +401,92 @@ fn run_loop(
                                     }
                                     ui.log_input.clear();
                                     ui.mode = InputMode::Normal;
+                                    ui.input_cursor = 0;
+                                    ui.input_scroll_x = 0;
                                 }
                                 KeyCode::Backspace => {
-                                    ui.log_input.pop();
+                                    if ui.input_cursor > 0 {
+                                        let idx = byte_index_from_char(
+                                            &ui.log_input,
+                                            ui.input_cursor - 1,
+                                        );
+                                        let next_idx =
+                                            byte_index_from_char(&ui.log_input, ui.input_cursor);
+                                        ui.log_input.replace_range(idx..next_idx, "");
+                                        ui.input_cursor -= 1;
+                                        ui.input_scroll_x = adjust_input_scroll(
+                                            &ui.log_input,
+                                            ui.input_cursor,
+                                            input_inner_width,
+                                            ui.input_scroll_x,
+                                        );
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    let len = ui.log_input.chars().count();
+                                    if ui.input_cursor < len {
+                                        let idx =
+                                            byte_index_from_char(&ui.log_input, ui.input_cursor);
+                                        let next_idx = byte_index_from_char(
+                                            &ui.log_input,
+                                            ui.input_cursor + 1,
+                                        );
+                                        ui.log_input.replace_range(idx..next_idx, "");
+                                        ui.input_scroll_x = adjust_input_scroll(
+                                            &ui.log_input,
+                                            ui.input_cursor,
+                                            input_inner_width,
+                                            ui.input_scroll_x,
+                                        );
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if ui.input_cursor > 0 {
+                                        ui.input_cursor -= 1;
+                                    }
+                                    ui.input_scroll_x = adjust_input_scroll(
+                                        &ui.log_input,
+                                        ui.input_cursor,
+                                        input_inner_width,
+                                        ui.input_scroll_x,
+                                    );
+                                }
+                                KeyCode::Right => {
+                                    let len = ui.log_input.chars().count();
+                                    if ui.input_cursor < len {
+                                        ui.input_cursor += 1;
+                                    }
+                                    ui.input_scroll_x = adjust_input_scroll(
+                                        &ui.log_input,
+                                        ui.input_cursor,
+                                        input_inner_width,
+                                        ui.input_scroll_x,
+                                    );
+                                }
+                                KeyCode::Home => {
+                                    ui.input_cursor = 0;
+                                    ui.input_scroll_x = 0;
+                                }
+                                KeyCode::End => {
+                                    ui.input_cursor = ui.log_input.chars().count();
+                                    ui.input_scroll_x = adjust_input_scroll(
+                                        &ui.log_input,
+                                        ui.input_cursor,
+                                        input_inner_width,
+                                        ui.input_scroll_x,
+                                    );
                                 }
                                 KeyCode::Char(c) => {
-                                    ui.log_input.push(c);
+                                    let idx =
+                                        byte_index_from_char(&ui.log_input, ui.input_cursor);
+                                    ui.log_input.insert(idx, c);
+                                    ui.input_cursor += 1;
+                                    ui.input_scroll_x = adjust_input_scroll(
+                                        &ui.log_input,
+                                        ui.input_cursor,
+                                        input_inner_width,
+                                        ui.input_scroll_x,
+                                    );
                                 }
                                 _ => {}
                             },
@@ -395,6 +544,77 @@ fn compute_layout(area: Rect) -> LayoutInfo {
         input: chunks[2],
         term_inner,
     }
+}
+
+fn slice_from_col(text: &str, start_col: usize, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut col = 0;
+
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w <= start_col {
+            col += w;
+            continue;
+        }
+        if col >= start_col + max_cols {
+            break;
+        }
+        out.push(ch);
+        col += w;
+    }
+
+    out
+}
+
+fn width_upto_char(text: &str, char_idx: usize) -> usize {
+    let mut width = 0;
+    for (i, ch) in text.chars().enumerate() {
+        if i >= char_idx {
+            break;
+        }
+        width += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    width
+}
+
+fn byte_index_from_char(text: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    for (i, (byte_idx, _)) in text.char_indices().enumerate() {
+        if i == char_idx {
+            return byte_idx;
+        }
+    }
+    text.len()
+}
+
+fn adjust_input_scroll(
+    text: &str,
+    cursor: usize,
+    inner_width: usize,
+    current_scroll: usize,
+) -> usize {
+    if inner_width == 0 {
+        return 0;
+    }
+    let max_visible = inner_width.saturating_sub(1);
+    let total_width = text.width();
+    let cursor_width = width_upto_char(text, cursor);
+    let mut scroll = current_scroll;
+
+    if cursor_width < scroll {
+        scroll = cursor_width;
+    } else if cursor_width > scroll + max_visible {
+        scroll = cursor_width.saturating_sub(max_visible);
+    }
+
+    let max_start = total_width.saturating_sub(max_visible);
+    scroll.min(max_start)
 }
 
 fn debug_lines(
