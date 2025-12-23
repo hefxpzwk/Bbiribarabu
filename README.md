@@ -19,7 +19,7 @@ Download the Linux x86_64 binary from GitHub Releases:
 
 https://github.com/hefxpzwk/Bbiribarabu/releases
 
-Quick install via command line:
+### Quick install via command line:
 
 ```bash
 curl -L -o Bbiribarabu \
@@ -27,6 +27,7 @@ https://github.com/hefxpzwk/Bbiribarabu/releases/download/v1.0.0/Bbiribarabu
 
 chmod +x Bbiribarabu
 ./Bbiribarabu
+```
 
 ## Requirements
 
