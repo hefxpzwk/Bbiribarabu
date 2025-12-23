@@ -1,6 +1,6 @@
 # Bbiribarabu
 
-[한국어 README](README.ko.md)   
+[한국어 README](README.ko.md)
 
 Bbiribarabu is a branch-scoped logbook for Git repositories. It keeps quick notes per branch, offers a split TUI with an embedded shell, and can capture voice notes via Whisper.
 
@@ -22,11 +22,11 @@ https://github.com/hefxpzwk/Bbiribarabu/releases
 ### Quick install via command line:
 
 ```bash
-curl -L -o Bbiribarabu \
-https://github.com/hefxpzwk/Bbiribarabu/releases/download/v1.0.0/Bbiribarabu
+curl -L -o bbiribarabu \
+https://github.com/hefxpzwk/Bbiribarabu/releases/download/v1.0.0/bbiribarabu-linux-x86_64 \
+&& chmod +x bbiribarabu \
+&& sudo mv bbiribarabu /usr/local/bin/ \
 
-chmod +x Bbiribarabu
-./Bbiribarabu
 ```
 
 ## Requirements
