@@ -63,8 +63,10 @@ fn main() {
         }
 
         Some(Commands::Voice { seconds }) => {
-            let model_path = std::env::var("WHISPER_MODEL")
-                .unwrap_or_else(|_| "models/ggml-tiny.bin".to_string());
+            let model_path = voice::model::prepare_model_path().unwrap_or_else(|e| {
+                eprintln!("모델 준비 실패: {}", e);
+                std::process::exit(1);
+            });
 
             let mut config = voice::VadConfig::default();
             config.max_record_ms = (seconds.max(1) as u32) * 1000;

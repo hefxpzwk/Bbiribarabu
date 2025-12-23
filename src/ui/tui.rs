@@ -503,8 +503,16 @@ fn run_loop(
                                 }
                                 KeyCode::Char('v') => {
                                     if ui.voice_task.is_none() {
-                                        let model_path = std::env::var("WHISPER_MODEL")
-                                            .unwrap_or_else(|_| "models/ggml-tiny.bin".to_string());
+                                        let model_path = match voice::model::prepare_model_path() {
+                                            Ok(path) => path,
+                                            Err(err) => {
+                                                ui.set_status(&format!(
+                                                    "모델 준비 실패: {}",
+                                                    err
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         let (tx, rx) =
                                             mpsc::channel::<Result<String, String>>();
                                         ui.voice_task = Some(rx);

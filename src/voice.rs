@@ -7,6 +7,8 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use whisper_rs::whisper_rs_sys::ggml_log_level;
 use std::ffi::{c_char, c_void};
 
+pub mod model;
+
 pub struct VoiceRecording {
     #[allow(dead_code)]
     stream: cpal::Stream,
