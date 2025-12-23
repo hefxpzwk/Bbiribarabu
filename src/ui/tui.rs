@@ -1,6 +1,7 @@
 use std::{
     io::{self, Stdout},
     path::PathBuf,
+    sync::mpsc::{self, TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -45,7 +46,7 @@ struct UiState {
     pty: PtyTerminal,
     debug_overlay: bool,
     status_message: Option<(String, Instant)>,
-    voice_recording: Option<voice::VoiceRecording>,
+    voice_task: Option<mpsc::Receiver<Result<String, String>>>,
     log_scroll_y: usize,
     log_scroll_x: usize,
     input_scroll_x: usize,
@@ -61,7 +62,7 @@ impl UiState {
             pty: PtyTerminal::spawn(repo_root, rows, cols)?,
             debug_overlay: false,
             status_message: None,
-            voice_recording: None,
+            voice_task: None,
             log_scroll_y: 0,
             log_scroll_x: 0,
             input_scroll_x: 0,
@@ -117,7 +118,7 @@ fn run_loop(
             ui.input_scroll_x = 0;
         }
         if let Some((_, at)) = ui.status_message.as_ref() {
-            if ui.voice_recording.is_none() && at.elapsed() > Duration::from_secs(2) {
+            if ui.voice_task.is_none() && at.elapsed() > Duration::from_secs(2) {
                 ui.status_message = None;
             }
         }
@@ -144,6 +145,36 @@ fn run_loop(
             }
         } else {
             ui.log_scroll_y = 0;
+        }
+
+        if let Some(rx) = ui.voice_task.as_ref() {
+            match rx.try_recv() {
+                Ok(result) => {
+                    ui.voice_task = None;
+                    match result {
+                        Ok(t) => {
+                            let trimmed = t.trim();
+                            if trimmed.is_empty() {
+                                ui.set_status("보이스 인식 결과 없음");
+                            } else if let Err(e) =
+                                app.log_store.append_text(&app.current_branch, trimmed)
+                            {
+                                ui.set_status(format!("보이스 로그 실패: {}", e));
+                            } else {
+                                ui.set_status("보이스 로그 추가됨");
+                            }
+                        }
+                        Err(e) => {
+                            ui.set_status(format!("보이스 인식 실패: {}", e));
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    ui.voice_task = None;
+                    ui.set_status("보이스 인식 실패");
+                }
+            }
         }
 
         terminal.draw(|f| {
@@ -256,8 +287,8 @@ fn run_loop(
                     let cursor = cursor_width.saturating_sub(ui.input_scroll_x).min(max_visible);
                     (sliced, Some(cursor as u16))
                 }
-            } else if ui.voice_recording.is_some() {
-                ("녹음중... 다시 v로 종료".to_string(), None)
+            } else if ui.voice_task.is_some() {
+                ("녹음중... 멈추면 자동 종료".to_string(), None)
             } else if let Some((ref msg, _)) = ui.status_message {
                 (msg.clone(), None)
             } else {
@@ -321,46 +352,20 @@ fn run_loop(
                                     ui.input_scroll_x = 0;
                                 }
                                 KeyCode::Char('v') => {
-                                    if ui.voice_recording.is_none() {
-                                        match voice::start_recording() {
-                                            Ok(rec) => {
-                                                ui.voice_recording = Some(rec);
-                                                ui.set_status("녹음중... 다시 v로 종료");
-                                            }
-                                            Err(e) => {
-                                                ui.set_status(format!("녹음 시작 실패: {}", e));
-                                            }
-                                        }
-                                    } else if let Some(rec) = ui.voice_recording.take() {
+                                    if ui.voice_task.is_none() {
                                         let model_path = std::env::var("WHISPER_MODEL")
                                             .unwrap_or_else(|_| "models/ggml-tiny.bin".to_string());
-                                        let (audio, rate, channels) = rec.stop();
-                                        match voice::transcribe_audio(
-                                            &model_path,
-                                            audio,
-                                            rate,
-                                            channels,
-                                        ) {
-                                            Ok(t) => {
-                                                let trimmed = t.trim();
-                                                if trimmed.is_empty() {
-                                                    ui.set_status("보이스 인식 결과 없음");
-                                                } else if let Err(e) = app
-                                                    .log_store
-                                                    .append_text(&app.current_branch, trimmed)
-                                                {
-                                                    ui.set_status(format!(
-                                                        "보이스 로그 실패: {}",
-                                                        e
-                                                    ));
-                                                } else {
-                                                    ui.set_status("보이스 로그 추가됨");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                ui.set_status(format!("보이스 인식 실패: {}", e));
-                                            }
-                                        }
+                                        let (tx, rx) =
+                                            mpsc::channel::<Result<String, String>>();
+                                        ui.voice_task = Some(rx);
+                                        ui.set_status("녹음중... 멈추면 자동 종료");
+
+                                        std::thread::spawn(move || {
+                                            let config = voice::VadConfig::default();
+                                            let result =
+                                                voice::transcribe_from_mic_vad(&model_path, config);
+                                            let _ = tx.send(result);
+                                        });
                                     }
                                 }
                                 KeyCode::Up => {

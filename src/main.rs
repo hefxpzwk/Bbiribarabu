@@ -8,7 +8,6 @@ mod voice;
 use app::AppState;
 use clap::Parser;
 use cli::{Cli, Commands};
-use std::time::Duration;
 use voice::silence_whisper_logs;
 
 fn main() {
@@ -67,7 +66,9 @@ fn main() {
             let model_path = std::env::var("WHISPER_MODEL")
                 .unwrap_or_else(|_| "models/ggml-tiny.bin".to_string());
 
-            let text = voice::transcribe_from_mic(Duration::from_secs(seconds), &model_path)
+            let mut config = voice::VadConfig::default();
+            config.max_record_ms = (seconds.max(1) as u32) * 1000;
+            let text = voice::transcribe_from_mic_vad(&model_path, config)
                 .unwrap_or_else(|e| {
                     eprintln!("보이스 인식 실패: {}", e);
                     std::process::exit(1);

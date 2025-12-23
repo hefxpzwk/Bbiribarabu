@@ -14,6 +14,29 @@ pub struct VoiceRecording {
     channels: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VadConfig {
+    pub frame_ms: u32,
+    pub start_threshold: f32,
+    pub start_frames: usize,
+    pub end_silence_ms: u32,
+    pub pre_roll_ms: u32,
+    pub max_record_ms: u32,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            frame_ms: 20,
+            start_threshold: 0.02,
+            start_frames: 3,
+            end_silence_ms: 800,
+            pre_roll_ms: 200,
+            max_record_ms: 10_000,
+        }
+    }
+}
+
 pub fn transcribe_from_mic(duration: Duration, model_path: &str) -> Result<String, String> {
     silence_whisper_logs();
     let recorder = start_recording()?;
@@ -23,6 +46,94 @@ pub fn transcribe_from_mic(duration: Duration, model_path: &str) -> Result<Strin
     }
     let (audio, input_rate, channels) = recorder.stop();
     transcribe_audio(model_path, audio, input_rate, channels)
+}
+
+pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<String, String> {
+    silence_whisper_logs();
+    let recorder = start_recording()?;
+    let start = Instant::now();
+
+    let frame_samples_per_channel =
+        (recorder.sample_rate as u64 * config.frame_ms as u64 / 1000) as usize;
+    let channels = recorder.channels as usize;
+    if frame_samples_per_channel == 0 || channels == 0 {
+        return Err("입력 샘플레이트가 너무 낮습니다".to_string());
+    }
+    let frame_samples = frame_samples_per_channel * channels;
+    let pre_roll_samples =
+        (recorder.sample_rate as u64 * config.pre_roll_ms as u64 / 1000) as usize * channels;
+
+    let mut processed = 0usize;
+    let mut speaking = false;
+    let mut voiced_frames = 0usize;
+    let mut silence_ms = 0u32;
+    let mut speech_start = 0usize;
+    let mut speech_end = 0usize;
+
+    loop {
+        if start.elapsed() > Duration::from_millis(config.max_record_ms as u64) {
+            if speaking {
+                let data = recorder.buffer.lock().unwrap();
+                speech_end = data.len();
+            } else {
+                drop(recorder);
+                return Err("음성이 감지되지 않았습니다".to_string());
+            }
+            break;
+        }
+
+        let available = {
+            let data = recorder.buffer.lock().unwrap();
+            data.len()
+        };
+
+        if available < processed + frame_samples {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+
+        let (rms, frame_end) = {
+            let data = recorder.buffer.lock().unwrap();
+            let frame = &data[processed..processed + frame_samples];
+            (rms_energy(frame, recorder.channels), processed + frame_samples)
+        };
+
+        let voiced = rms >= config.start_threshold;
+        if !speaking {
+            if voiced {
+                voiced_frames += 1;
+            } else {
+                voiced_frames = 0;
+            }
+            if voiced_frames >= config.start_frames {
+                speaking = true;
+                speech_start = processed.saturating_sub(pre_roll_samples);
+                silence_ms = 0;
+            }
+        } else if voiced {
+            silence_ms = 0;
+        } else {
+            silence_ms += config.frame_ms;
+            if silence_ms >= config.end_silence_ms {
+                speech_end = frame_end;
+                break;
+            }
+        }
+
+        processed = frame_end;
+    }
+
+    let mut data = recorder.buffer.lock().unwrap().clone();
+    let sample_rate = recorder.sample_rate;
+    let channels = recorder.channels;
+    drop(recorder);
+
+    if speech_end <= speech_start || speech_end > data.len() {
+        return Err("유효한 음성 구간을 찾지 못했습니다".to_string());
+    }
+
+    let audio = data.drain(speech_start..speech_end).collect::<Vec<_>>();
+    transcribe_audio(model_path, audio, sample_rate, channels)
 }
 
 pub fn start_recording() -> Result<VoiceRecording, String> {
@@ -163,6 +274,28 @@ fn linear_resample(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32>
     }
 
     out
+}
+
+fn rms_energy(frame: &[f32], channels: u16) -> f32 {
+    let channels = channels as usize;
+    if channels == 0 || frame.is_empty() {
+        return 0.0;
+    }
+    let frames = frame.len() / channels;
+    if frames == 0 {
+        return 0.0;
+    }
+    let mut sum_sq = 0.0f64;
+    for i in 0..frames {
+        let base = i * channels;
+        let mut sum = 0.0f32;
+        for ch in 0..channels {
+            sum += frame[base + ch];
+        }
+        let mono = sum / channels as f32;
+        sum_sq += (mono as f64) * (mono as f64);
+    }
+    ((sum_sq / frames as f64) as f32).sqrt()
 }
 
 fn transcribe_whisper(model_path: &str, audio_16k: &[f32]) -> Result<String, String> {
