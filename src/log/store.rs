@@ -61,4 +61,51 @@ impl LogStore {
     pub fn list(&self, branch: &str) -> Result<Vec<LogItem>, String> {
         Ok(self.load(branch)?.items)
     }
+
+    pub fn delete_by_id(&self, branch: &str, id: &str) -> Result<bool, String> {
+        let mut file = self.load(branch)?;
+        let before = file.items.len();
+        file.items.retain(|item| item.id != id);
+        if file.items.len() == before {
+            return Ok(false);
+        }
+
+        let path = self.branch_file_path(branch);
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| format!("로그 JSON 직렬화 실패: {}", e))?;
+
+        fs::write(&path, json)
+            .map_err(|e| format!("로그 파일 쓰기 실패: {} ({})", e, path.display()))?;
+
+        Ok(true)
+    }
+
+    pub fn update_text_by_id(
+        &self,
+        branch: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        let mut file = self.load(branch)?;
+        let mut found = false;
+        for item in &mut file.items {
+            if item.id == id {
+                item.text = text.to_string();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+
+        let path = self.branch_file_path(branch);
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| format!("로그 JSON 직렬화 실패: {}", e))?;
+
+        fs::write(&path, json)
+            .map_err(|e| format!("로그 파일 쓰기 실패: {} ({})", e, path.display()))?;
+
+        Ok(true)
+    }
 }

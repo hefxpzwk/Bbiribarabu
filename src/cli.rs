@@ -18,4 +18,11 @@ pub enum Commands {
 
     /// 현재 브랜치 로그 목록 조회
     List,
+
+    /// 음성 인식 후 로그 추가
+    Voice {
+        /// 녹음 시간(초)
+        #[arg(short, long, default_value_t = 5)]
+        seconds: u64,
+    },
 }
