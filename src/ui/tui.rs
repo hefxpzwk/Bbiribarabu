@@ -37,6 +37,7 @@ enum InputMode {
     Normal,
     EditingLog,
     ConfirmDelete,
+    Searching,
 }
 
 struct UiState {
@@ -52,6 +53,10 @@ struct UiState {
     log_scroll_x: usize,
     input_scroll_x: usize,
     selected_log_index: usize,
+    editing_log_id: Option<String>,
+    search_query: String,
+    search_cursor: usize,
+    search_scroll_x: usize,
 }
 
 impl UiState {
@@ -69,6 +74,10 @@ impl UiState {
             log_scroll_x: 0,
             input_scroll_x: 0,
             selected_log_index: 0,
+            editing_log_id: None,
+            search_query: String::new(),
+            search_cursor: 0,
+            search_scroll_x: 0,
         })
     }
 
@@ -119,6 +128,7 @@ fn run_loop(
             ui.log_input.clear();
             ui.input_cursor = 0;
             ui.input_scroll_x = 0;
+            ui.editing_log_id = None;
         }
         if prev_branch != app.current_branch && ui.mode == InputMode::ConfirmDelete {
             ui.mode = InputMode::Normal;
@@ -142,7 +152,18 @@ fn run_loop(
             .into_iter()
             .rev()
             .collect::<Vec<_>>();
-        let log_items = log_items_raw
+        let query = ui.search_query.trim();
+        let query_lower = query.to_lowercase();
+        let log_items_filtered = if query.is_empty() {
+            log_items_raw.clone()
+        } else {
+            log_items_raw
+                .iter()
+                .filter(|it| it.text.to_lowercase().contains(&query_lower))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let log_items = log_items_filtered
             .iter()
             .map(|it| format!("[{}] {}", it.created_at.format("%m-%d %H:%M"), it.text))
             .collect::<Vec<_>>();
@@ -293,46 +314,72 @@ fn run_loop(
                             " Enter log (Enter=save, Esc=cancel) "
                         }
                         (Focus::LogInput, InputMode::Normal) => {
-                            " Log input (press i to add, v=voice, Esc=switch, q=quit) "
+                            " Log input (i=add, e=edit, d=del, /=search, v=voice, Esc=switch, q=quit) "
                         }
                         (Focus::LogInput, InputMode::ConfirmDelete) => {
                             " Confirm delete (y/n) "
                         }
+                        (Focus::LogInput, InputMode::Searching) => {
+                            " Search (Enter=apply, Esc=clear) "
+                        }
                         _ => " Log input (Esc to focus) ",
                     });
 
-            let (input_text, cursor_col) = if matches!(ui.mode, InputMode::EditingLog) {
-                if input_inner_width == 0 {
-                    (String::new(), None)
-                } else {
-                    let width = ui.log_input.as_str().width();
-                    let cursor_width = width_upto_char(&ui.log_input, ui.input_cursor);
-                    let max_visible = input_inner_width.saturating_sub(1);
-                    let max_start = width.saturating_sub(max_visible);
-                    if ui.input_scroll_x > max_start {
-                        ui.input_scroll_x = max_start;
+            let (input_text, cursor_col) = match ui.mode {
+                InputMode::EditingLog => {
+                    if input_inner_width == 0 {
+                        (String::new(), None)
+                    } else {
+                        let width = ui.log_input.as_str().width();
+                        let cursor_width = width_upto_char(&ui.log_input, ui.input_cursor);
+                        let max_visible = input_inner_width.saturating_sub(1);
+                        let max_start = width.saturating_sub(max_visible);
+                        if ui.input_scroll_x > max_start {
+                            ui.input_scroll_x = max_start;
+                        }
+                        let sliced =
+                            slice_from_col(&ui.log_input, ui.input_scroll_x, input_inner_width);
+                        let cursor = cursor_width.saturating_sub(ui.input_scroll_x).min(max_visible);
+                        (sliced, Some(cursor as u16))
                     }
-                    let sliced =
-                        slice_from_col(&ui.log_input, ui.input_scroll_x, input_inner_width);
-                    let cursor = cursor_width.saturating_sub(ui.input_scroll_x).min(max_visible);
-                    (sliced, Some(cursor as u16))
                 }
-            } else if matches!(ui.mode, InputMode::ConfirmDelete) {
-                (
+                InputMode::Searching => {
+                    if input_inner_width == 0 {
+                        (String::new(), None)
+                    } else {
+                        let width = ui.search_query.as_str().width();
+                        let cursor_width = width_upto_char(&ui.search_query, ui.search_cursor);
+                        let max_visible = input_inner_width.saturating_sub(1);
+                        let max_start = width.saturating_sub(max_visible);
+                        if ui.search_scroll_x > max_start {
+                            ui.search_scroll_x = max_start;
+                        }
+                        let sliced =
+                            slice_from_col(&ui.search_query, ui.search_scroll_x, input_inner_width);
+                        let cursor = cursor_width.saturating_sub(ui.search_scroll_x).min(max_visible);
+                        (sliced, Some(cursor as u16))
+                    }
+                }
+                InputMode::ConfirmDelete => (
                     "정말 이 로그를 삭제할까요? [y] 삭제 / [n] 취소".to_string(),
                     None,
-                )
-            } else if ui.voice_task.is_some() {
-                ("녹음중... 멈추면 자동 종료".to_string(), None)
-            } else if let Some((ref msg, _)) = ui.status_message {
-                (msg.clone(), None)
-            } else {
-                (String::new(), None)
+                ),
+                _ => {
+                    if ui.voice_task.is_some() {
+                        ("녹음중... 멈추면 자동 종료".to_string(), None)
+                    } else if let Some((ref msg, _)) = ui.status_message {
+                        (msg.clone(), None)
+                    } else {
+                        (String::new(), None)
+                    }
+                }
             };
             let input = Paragraph::new(input_text).block(input_block);
             f.render_widget(input, layout.input);
 
-            if matches!(ui.mode, InputMode::EditingLog) && ui.focus == Focus::LogInput {
+            if matches!(ui.mode, InputMode::EditingLog | InputMode::Searching)
+                && ui.focus == Focus::LogInput
+            {
                 if let Some(col) = cursor_col {
                     f.set_cursor(layout.input.x + col + 1, layout.input.y + 1);
                 }
@@ -345,13 +392,13 @@ fn run_loop(
                     if ui.mode == InputMode::ConfirmDelete {
                         match key.code {
                             KeyCode::Char('y') => {
-                                if let Some(item) = log_items_raw.get(ui.selected_log_index) {
+                                if let Some(item) = log_items_filtered.get(ui.selected_log_index) {
                                     if let Ok(true) = app.log_store.delete_by_id(
                                         &app.current_branch,
                                         &item.id,
                                     ) {
                                         ui.set_status("log deleted");
-                                        let next_len = log_items_raw.len().saturating_sub(1);
+                                        let next_len = log_items_filtered.len().saturating_sub(1);
                                         if next_len == 0 {
                                             ui.selected_log_index = 0;
                                         } else if ui.selected_log_index >= next_len {
@@ -370,7 +417,12 @@ fn run_loop(
                     }
                     if key.code == KeyCode::Esc
                         && !(ui.focus == Focus::LogInput
-                            && matches!(ui.mode, InputMode::EditingLog | InputMode::ConfirmDelete))
+                            && matches!(
+                                ui.mode,
+                                InputMode::EditingLog
+                                    | InputMode::ConfirmDelete
+                                    | InputMode::Searching
+                            ))
                     {
                         ui.focus = match ui.focus {
                             Focus::Terminal => Focus::LogInput,
@@ -380,7 +432,11 @@ fn run_loop(
                     }
 
                     match key.code {
-                        KeyCode::Char('q') if ui.focus == Focus::LogInput => break,
+                        KeyCode::Char('q')
+                            if ui.focus == Focus::LogInput && ui.mode == InputMode::Normal =>
+                        {
+                            break
+                        }
                         KeyCode::F(2) => {
                             ui.debug_overlay = !ui.debug_overlay;
                         }
@@ -412,11 +468,38 @@ fn run_loop(
                                     ui.log_input.clear();
                                     ui.input_cursor = 0;
                                     ui.input_scroll_x = 0;
+                                    ui.editing_log_id = None;
                                 }
                                 KeyCode::Char('d') => {
-                                    if !log_items_raw.is_empty() {
+                                    if !log_items_filtered.is_empty() {
                                         ui.mode = InputMode::ConfirmDelete;
                                     }
+                                }
+                                KeyCode::Char('e') => {
+                                    if let Some(item) =
+                                        log_items_filtered.get(ui.selected_log_index)
+                                    {
+                                        ui.mode = InputMode::EditingLog;
+                                        ui.log_input = item.text.clone();
+                                        ui.input_cursor = ui.log_input.chars().count();
+                                        ui.input_scroll_x = adjust_input_scroll(
+                                            &ui.log_input,
+                                            ui.input_cursor,
+                                            input_inner_width,
+                                            ui.input_scroll_x,
+                                        );
+                                        ui.editing_log_id = Some(item.id.clone());
+                                    }
+                                }
+                                KeyCode::Char('/') => {
+                                    ui.mode = InputMode::Searching;
+                                    ui.search_cursor = ui.search_query.chars().count();
+                                    ui.search_scroll_x = adjust_input_scroll(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                        input_inner_width,
+                                        ui.search_scroll_x,
+                                    );
                                 }
                                 KeyCode::Char('v') => {
                                     if ui.voice_task.is_none() {
@@ -440,7 +523,7 @@ fn run_loop(
                                         ui.selected_log_index.saturating_sub(1);
                                 }
                                 KeyCode::Down => {
-                                    if ui.selected_log_index + 1 < log_items_raw.len() {
+                                    if ui.selected_log_index + 1 < log_items_filtered.len() {
                                         ui.selected_log_index += 1;
                                     }
                                 }
@@ -452,11 +535,11 @@ fn run_loop(
                                 KeyCode::PageDown => {
                                     let step = log_inner_height.max(1);
                                     let next = ui.selected_log_index.saturating_add(step);
-                                    if log_items_raw.is_empty() {
+                                    if log_items_filtered.is_empty() {
                                         ui.selected_log_index = 0;
                                     } else {
                                         ui.selected_log_index =
-                                            next.min(log_items_raw.len().saturating_sub(1));
+                                            next.min(log_items_filtered.len().saturating_sub(1));
                                     }
                                 }
                                 KeyCode::Left => {
@@ -471,18 +554,133 @@ fn run_loop(
                                 _ => {}
                             },
                             InputMode::ConfirmDelete => {}
+                            InputMode::Searching => match key.code {
+                                KeyCode::Esc => {
+                                    ui.mode = InputMode::Normal;
+                                    ui.search_query.clear();
+                                    ui.search_cursor = 0;
+                                    ui.search_scroll_x = 0;
+                                }
+                                KeyCode::Enter => {
+                                    ui.mode = InputMode::Normal;
+                                }
+                                KeyCode::Backspace => {
+                                    if ui.search_cursor > 0 {
+                                        let idx = byte_index_from_char(
+                                            &ui.search_query,
+                                            ui.search_cursor - 1,
+                                        );
+                                        let next_idx = byte_index_from_char(
+                                            &ui.search_query,
+                                            ui.search_cursor,
+                                        );
+                                        ui.search_query.replace_range(idx..next_idx, "");
+                                        ui.search_cursor -= 1;
+                                        ui.search_scroll_x = adjust_input_scroll(
+                                            &ui.search_query,
+                                            ui.search_cursor,
+                                            input_inner_width,
+                                            ui.search_scroll_x,
+                                        );
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    let len = ui.search_query.chars().count();
+                                    if ui.search_cursor < len {
+                                        let idx = byte_index_from_char(
+                                            &ui.search_query,
+                                            ui.search_cursor,
+                                        );
+                                        let next_idx = byte_index_from_char(
+                                            &ui.search_query,
+                                            ui.search_cursor + 1,
+                                        );
+                                        ui.search_query.replace_range(idx..next_idx, "");
+                                        ui.search_scroll_x = adjust_input_scroll(
+                                            &ui.search_query,
+                                            ui.search_cursor,
+                                            input_inner_width,
+                                            ui.search_scroll_x,
+                                        );
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if ui.search_cursor > 0 {
+                                        ui.search_cursor -= 1;
+                                    }
+                                    ui.search_scroll_x = adjust_input_scroll(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                        input_inner_width,
+                                        ui.search_scroll_x,
+                                    );
+                                }
+                                KeyCode::Right => {
+                                    let len = ui.search_query.chars().count();
+                                    if ui.search_cursor < len {
+                                        ui.search_cursor += 1;
+                                    }
+                                    ui.search_scroll_x = adjust_input_scroll(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                        input_inner_width,
+                                        ui.search_scroll_x,
+                                    );
+                                }
+                                KeyCode::Home => {
+                                    ui.search_cursor = 0;
+                                    ui.search_scroll_x = 0;
+                                }
+                                KeyCode::End => {
+                                    ui.search_cursor = ui.search_query.chars().count();
+                                    ui.search_scroll_x = adjust_input_scroll(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                        input_inner_width,
+                                        ui.search_scroll_x,
+                                    );
+                                }
+                                KeyCode::Char(c) => {
+                                    let idx = byte_index_from_char(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                    );
+                                    ui.search_query.insert(idx, c);
+                                    ui.search_cursor += 1;
+                                    ui.search_scroll_x = adjust_input_scroll(
+                                        &ui.search_query,
+                                        ui.search_cursor,
+                                        input_inner_width,
+                                        ui.search_scroll_x,
+                                    );
+                                }
+                                _ => {}
+                            },
                             InputMode::EditingLog => match key.code {
                                 KeyCode::Esc => {
                                     ui.mode = InputMode::Normal;
                                     ui.log_input.clear();
                                     ui.input_cursor = 0;
                                     ui.input_scroll_x = 0;
+                                    ui.editing_log_id = None;
                                 }
                                 KeyCode::Enter => {
                                     if !ui.log_input.trim().is_empty() {
-                                        let _ = app
-                                            .log_store
-                                            .append_text(&app.current_branch, &ui.log_input);
+                                        if let Some(id) = ui.editing_log_id.take() {
+                                            if let Ok(true) = app.log_store.update_text_by_id(
+                                                &app.current_branch,
+                                                &id,
+                                                &ui.log_input,
+                                            ) {
+                                                ui.set_status("log updated");
+                                            }
+                                        } else {
+                                            let _ = app
+                                                .log_store
+                                                .append_text(&app.current_branch, &ui.log_input);
+                                        }
+                                    } else {
+                                        ui.editing_log_id = None;
                                     }
                                     ui.log_input.clear();
                                     ui.mode = InputMode::Normal;

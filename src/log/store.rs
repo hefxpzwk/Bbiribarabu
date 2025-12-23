@@ -79,4 +79,33 @@ impl LogStore {
 
         Ok(true)
     }
+
+    pub fn update_text_by_id(
+        &self,
+        branch: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<bool, String> {
+        let mut file = self.load(branch)?;
+        let mut found = false;
+        for item in &mut file.items {
+            if item.id == id {
+                item.text = text.to_string();
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+
+        let path = self.branch_file_path(branch);
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| format!("로그 JSON 직렬화 실패: {}", e))?;
+
+        fs::write(&path, json)
+            .map_err(|e| format!("로그 파일 쓰기 실패: {} ({})", e, path.display()))?;
+
+        Ok(true)
+    }
 }
