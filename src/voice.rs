@@ -8,6 +8,7 @@ use whisper_rs::whisper_rs_sys::ggml_log_level;
 use std::ffi::{c_char, c_void};
 
 pub struct VoiceRecording {
+    #[allow(dead_code)]
     stream: cpal::Stream,
     buffer: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
@@ -37,6 +38,7 @@ impl Default for VadConfig {
     }
 }
 
+#[allow(dead_code)]
 pub fn transcribe_from_mic(duration: Duration, model_path: &str) -> Result<String, String> {
     silence_whisper_logs();
     let recorder = start_recording()?;
@@ -68,18 +70,15 @@ pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<St
     let mut voiced_frames = 0usize;
     let mut silence_ms = 0u32;
     let mut speech_start = 0usize;
-    let mut speech_end = 0usize;
-
-    loop {
+    let speech_end = loop {
         if start.elapsed() > Duration::from_millis(config.max_record_ms as u64) {
             if speaking {
                 let data = recorder.buffer.lock().unwrap();
-                speech_end = data.len();
+                break data.len();
             } else {
                 drop(recorder);
                 return Err("음성이 감지되지 않았습니다".to_string());
             }
-            break;
         }
 
         let available = {
@@ -115,13 +114,12 @@ pub fn transcribe_from_mic_vad(model_path: &str, config: VadConfig) -> Result<St
         } else {
             silence_ms += config.frame_ms;
             if silence_ms >= config.end_silence_ms {
-                speech_end = frame_end;
-                break;
+                break frame_end;
             }
         }
 
         processed = frame_end;
-    }
+    };
 
     let mut data = recorder.buffer.lock().unwrap().clone();
     let sample_rate = recorder.sample_rate;
@@ -207,6 +205,7 @@ pub fn start_recording() -> Result<VoiceRecording, String> {
 }
 
 impl VoiceRecording {
+    #[allow(dead_code)]
     pub fn stop(self) -> (Vec<f32>, u32, u16) {
         drop(self.stream);
         let data = self.buffer.lock().unwrap().clone();

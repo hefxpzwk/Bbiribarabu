@@ -36,6 +36,7 @@ enum Focus {
 enum InputMode {
     Normal,
     EditingLog,
+    ConfirmDelete,
 }
 
 struct UiState {
@@ -50,6 +51,7 @@ struct UiState {
     log_scroll_y: usize,
     log_scroll_x: usize,
     input_scroll_x: usize,
+    selected_log_index: usize,
 }
 
 impl UiState {
@@ -66,6 +68,7 @@ impl UiState {
             log_scroll_y: 0,
             log_scroll_x: 0,
             input_scroll_x: 0,
+            selected_log_index: 0,
         })
     }
 
@@ -117,6 +120,9 @@ fn run_loop(
             ui.input_cursor = 0;
             ui.input_scroll_x = 0;
         }
+        if prev_branch != app.current_branch && ui.mode == InputMode::ConfirmDelete {
+            ui.mode = InputMode::Normal;
+        }
         if let Some((_, at)) = ui.status_message.as_ref() {
             if ui.voice_task.is_none() && at.elapsed() > Duration::from_secs(2) {
                 ui.status_message = None;
@@ -129,22 +135,38 @@ fn run_loop(
             .ensure_size(layout.term_inner.height, layout.term_inner.width);
         ui.pty.poll_output();
 
-        let log_items = app
+        let log_items_raw = app
             .log_store
             .list(&app.current_branch)
             .unwrap_or_default()
             .into_iter()
             .rev()
+            .collect::<Vec<_>>();
+        let log_items = log_items_raw
+            .iter()
             .map(|it| format!("[{}] {}", it.created_at.format("%m-%d %H:%M"), it.text))
             .collect::<Vec<_>>();
         let log_inner_height = layout.logs.height.saturating_sub(2) as usize;
-        if log_inner_height > 0 {
-            let max_start = log_items.len().saturating_sub(log_inner_height);
-            if ui.log_scroll_y > max_start {
-                ui.log_scroll_y = max_start;
-            }
-        } else {
+        if log_items.is_empty() {
+            ui.selected_log_index = 0;
             ui.log_scroll_y = 0;
+        } else {
+            if ui.selected_log_index >= log_items.len() {
+                ui.selected_log_index = log_items.len().saturating_sub(1);
+            }
+            if log_inner_height > 0 {
+                let max_start = log_items.len().saturating_sub(log_inner_height);
+                if ui.log_scroll_y > max_start {
+                    ui.log_scroll_y = max_start;
+                }
+                if ui.selected_log_index < ui.log_scroll_y {
+                    ui.log_scroll_y = ui.selected_log_index;
+                } else if ui.selected_log_index >= ui.log_scroll_y + log_inner_height {
+                    ui.log_scroll_y = ui.selected_log_index + 1 - log_inner_height;
+                }
+            } else {
+                ui.log_scroll_y = 0;
+            }
         }
 
         if let Some(rx) = ui.voice_task.as_ref() {
@@ -248,9 +270,14 @@ fn run_loop(
             let end = (start + log_inner_height).min(log_items.len());
             let items = log_items[start..end]
                 .iter()
-                .map(|line| {
+                .enumerate()
+                .map(|(idx, line)| {
                     let sliced = slice_from_col(line, ui.log_scroll_x, log_inner_width);
-                    ListItem::new(Line::from(Span::raw(sliced)))
+                    let mut item = ListItem::new(Line::from(Span::raw(sliced)));
+                    if start + idx == ui.selected_log_index {
+                        item = item.style(Style::default().add_modifier(Modifier::REVERSED));
+                    }
+                    item
                 })
                 .collect::<Vec<_>>();
             let log_block =
@@ -267,6 +294,9 @@ fn run_loop(
                         }
                         (Focus::LogInput, InputMode::Normal) => {
                             " Log input (press i to add, v=voice, Esc=switch, q=quit) "
+                        }
+                        (Focus::LogInput, InputMode::ConfirmDelete) => {
+                            " Confirm delete (y/n) "
                         }
                         _ => " Log input (Esc to focus) ",
                     });
@@ -287,6 +317,11 @@ fn run_loop(
                     let cursor = cursor_width.saturating_sub(ui.input_scroll_x).min(max_visible);
                     (sliced, Some(cursor as u16))
                 }
+            } else if matches!(ui.mode, InputMode::ConfirmDelete) {
+                (
+                    "정말 이 로그를 삭제할까요? [y] 삭제 / [n] 취소".to_string(),
+                    None,
+                )
             } else if ui.voice_task.is_some() {
                 ("녹음중... 멈추면 자동 종료".to_string(), None)
             } else if let Some((ref msg, _)) = ui.status_message {
@@ -307,8 +342,35 @@ fn run_loop(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
+                    if ui.mode == InputMode::ConfirmDelete {
+                        match key.code {
+                            KeyCode::Char('y') => {
+                                if let Some(item) = log_items_raw.get(ui.selected_log_index) {
+                                    if let Ok(true) = app.log_store.delete_by_id(
+                                        &app.current_branch,
+                                        &item.id,
+                                    ) {
+                                        ui.set_status("log deleted");
+                                        let next_len = log_items_raw.len().saturating_sub(1);
+                                        if next_len == 0 {
+                                            ui.selected_log_index = 0;
+                                        } else if ui.selected_log_index >= next_len {
+                                            ui.selected_log_index = next_len - 1;
+                                        }
+                                    }
+                                }
+                                ui.mode = InputMode::Normal;
+                            }
+                            KeyCode::Char('n') | KeyCode::Esc => {
+                                ui.mode = InputMode::Normal;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if key.code == KeyCode::Esc
-                        && !(ui.focus == Focus::LogInput && ui.mode == InputMode::EditingLog)
+                        && !(ui.focus == Focus::LogInput
+                            && matches!(ui.mode, InputMode::EditingLog | InputMode::ConfirmDelete))
                     {
                         ui.focus = match ui.focus {
                             Focus::Terminal => Focus::LogInput,
@@ -351,6 +413,11 @@ fn run_loop(
                                     ui.input_cursor = 0;
                                     ui.input_scroll_x = 0;
                                 }
+                                KeyCode::Char('d') => {
+                                    if !log_items_raw.is_empty() {
+                                        ui.mode = InputMode::ConfirmDelete;
+                                    }
+                                }
                                 KeyCode::Char('v') => {
                                     if ui.voice_task.is_none() {
                                         let model_path = std::env::var("WHISPER_MODEL")
@@ -369,16 +436,28 @@ fn run_loop(
                                     }
                                 }
                                 KeyCode::Up => {
-                                    ui.log_scroll_y = ui.log_scroll_y.saturating_sub(1);
+                                    ui.selected_log_index =
+                                        ui.selected_log_index.saturating_sub(1);
                                 }
                                 KeyCode::Down => {
-                                    ui.log_scroll_y = ui.log_scroll_y.saturating_add(1);
+                                    if ui.selected_log_index + 1 < log_items_raw.len() {
+                                        ui.selected_log_index += 1;
+                                    }
                                 }
                                 KeyCode::PageUp => {
-                                    ui.log_scroll_y = ui.log_scroll_y.saturating_sub(5);
+                                    let step = log_inner_height.max(1);
+                                    ui.selected_log_index =
+                                        ui.selected_log_index.saturating_sub(step);
                                 }
                                 KeyCode::PageDown => {
-                                    ui.log_scroll_y = ui.log_scroll_y.saturating_add(5);
+                                    let step = log_inner_height.max(1);
+                                    let next = ui.selected_log_index.saturating_add(step);
+                                    if log_items_raw.is_empty() {
+                                        ui.selected_log_index = 0;
+                                    } else {
+                                        ui.selected_log_index =
+                                            next.min(log_items_raw.len().saturating_sub(1));
+                                    }
                                 }
                                 KeyCode::Left => {
                                     ui.log_scroll_x = ui.log_scroll_x.saturating_sub(4);
@@ -391,6 +470,7 @@ fn run_loop(
                                 }
                                 _ => {}
                             },
+                            InputMode::ConfirmDelete => {}
                             InputMode::EditingLog => match key.code {
                                 KeyCode::Esc => {
                                     ui.mode = InputMode::Normal;
