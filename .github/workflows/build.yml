@@ -39,3 +39,16 @@ jobs:
           else
             mv target/release/Bbiribarabu bbiribarabu-macos
           fi
+
+      - name: Upload binaries & create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            bbiribarabu-linux
+            bbiribarabu-macos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
