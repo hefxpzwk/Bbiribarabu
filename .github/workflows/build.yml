@@ -37,4 +37,5 @@ jobs:
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             mv target/release/Bbiribarabu bbiribarabu-linux
           else
-            mv target/release/Bbiribarabu bbiribar
+            mv target/release/Bbiribarabu bbiribarabu-macos
+          fi
