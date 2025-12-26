@@ -18,11 +18,12 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use vt100::Color as VtColor;
 
 use crate::{
     app::AppState,
@@ -285,14 +286,8 @@ fn run_loop(
             let block = Block::default().borders(Borders::ALL).title(title);
             let inner = layout.term_inner;
 
-            let display_lines = ui.pty.lines();
-            let paragraph = Paragraph::new(
-                display_lines
-                    .into_iter()
-                    .map(Line::from)
-                    .collect::<Vec<_>>(),
-            )
-            .wrap(Wrap { trim: false });
+            let display_lines = terminal_lines(ui.pty.screen());
+            let paragraph = Paragraph::new(display_lines).wrap(Wrap { trim: false });
             f.render_widget(block, term_area);
             f.render_widget(paragraph, inner);
 
@@ -920,6 +915,86 @@ fn compute_layout(area: Rect) -> LayoutInfo {
         logs: body[1],
         input: chunks[2],
         term_inner,
+    }
+}
+
+fn terminal_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
+    let (rows, cols) = screen.size();
+    let mut lines = Vec::with_capacity(rows as usize);
+
+    for row in 0..rows {
+        let mut spans = Vec::new();
+        let mut current_style = Style::default();
+        let mut current_text = String::new();
+        let mut started = false;
+
+        for col in 0..cols {
+            let Some(cell) = screen.cell(row, col) else {
+                continue;
+            };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+
+            let text = if cell.has_contents() {
+                cell.contents()
+            } else {
+                " ".to_string()
+            };
+            let style = style_for_cell(cell);
+
+            if !started {
+                current_style = style;
+                current_text.push_str(&text);
+                started = true;
+            } else if style == current_style {
+                current_text.push_str(&text);
+            } else {
+                spans.push(Span::styled(current_text, current_style));
+                current_text = text;
+                current_style = style;
+            }
+        }
+
+        if started {
+            spans.push(Span::styled(current_text, current_style));
+        } else {
+            spans.push(Span::raw(""));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn style_for_cell(cell: &vt100::Cell) -> Style {
+    let mut style = Style::default();
+    if let Some(fg) = map_color(cell.fgcolor()) {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = map_color(cell.bgcolor()) {
+        style = style.bg(bg);
+    }
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cell.italic() {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    style
+}
+
+fn map_color(color: VtColor) -> Option<Color> {
+    match color {
+        VtColor::Default => None,
+        VtColor::Idx(idx) => Some(Color::Indexed(idx)),
+        VtColor::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
     }
 }
 

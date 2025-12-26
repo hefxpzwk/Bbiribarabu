@@ -1,2 +1,5 @@
 /target
 /.bbiribarabu/
+*.wav
+*.bin
+models/

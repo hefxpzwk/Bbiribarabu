@@ -8,7 +8,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
-use vt100::Parser;
+use vt100::{Parser, Screen};
 
 /// Owns the PTY handles and moves raw bytes between the shell and the UI.
 pub struct PtyShell {
@@ -125,10 +125,8 @@ impl PtyTerminal {
         }
     }
 
-    pub fn lines(&self) -> Vec<String> {
-        let screen = self.parser.screen();
-        let (_rows, cols) = screen.size();
-        screen.rows(0, cols).collect()
+    pub fn screen(&self) -> &Screen {
+        self.parser.screen()
     }
 
     pub fn cursor_state(&self) -> Option<CursorState> {
