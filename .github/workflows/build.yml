@@ -12,7 +12,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-13]
 
     runs-on: ${{ matrix.os }}
 
@@ -29,8 +29,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
-      - name: Build release binary
+      - name: Build release binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo build --release
+
+      - name: Build release binary (macOS)
+        if: matrix.os == 'macos-13'
+        run: |
+          MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release
 
       - name: Rename binary
         run: |
