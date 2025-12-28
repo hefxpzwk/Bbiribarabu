@@ -9,12 +9,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-13]
-
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -23,38 +20,47 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config
 
-      - name: Build release binary (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build Linux release binary
         run: cargo build --release
 
-      - name: Build release binary (macOS)
-        if: matrix.os == 'macos-13'
+      - name: Rename Linux binary
+        run: |
+          mv target/release/Bbiribarabu bbiribarabu-linux
+
+      - name: Upload Linux binary to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: bbiribarabu-linux
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    name: Build macOS binary
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build macOS release binary
         run: |
           MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release
 
-      - name: Rename binary
+      - name: Rename macOS binary
         run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            mv target/release/Bbiribarabu bbiribarabu-linux
-          else
-            mv target/release/Bbiribarabu bbiribarabu-macos
-          fi
+          mv target/release/Bbiribarabu bbiribarabu-macos
 
-      - name: Upload binaries & create GitHub Release
+      - name: Upload macOS binary to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          files: |
-            bbiribarabu-linux
-            bbiribarabu-macos
+          files: bbiribarabu-macos
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
