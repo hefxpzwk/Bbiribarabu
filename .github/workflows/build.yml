@@ -37,27 +37,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos:
-    name: Build macOS binary
-    runs-on: macos-13
+    name: Build macOS (arm64)
+    runs-on: macos-14
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
 
-      - name: Build
+      - name: Build (arm64)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
         run: |
-          MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release
+          cargo build --release --target aarch64-apple-darwin
 
       - name: Package
         run: |
-          mv target/release/Bbiribarabu bbiribarabu
-          tar -czvf bbiribarabu-macos-x86_64.tar.gz bbiribarabu
+          mv target/aarch64-apple-darwin/release/Bbiribarabu bbiribarabu
+          tar -czvf bbiribarabu-macos-arm64.tar.gz bbiribarabu
 
       - name: Upload macOS release asset
         uses: softprops/action-gh-release@v1
         with:
-          files: bbiribarabu-macos-x86_64.tar.gz
+          files: bbiribarabu-macos-arm64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -80,7 +84,7 @@ jobs:
 
           VERSION="${GITHUB_REF_NAME}"
 
-          MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-x86_64.tar.gz"
+          MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-arm64.tar.gz"
           MAC_SHA=$(curl -sL "$MAC_URL" | shasum -a 256 | awk '{print $1}')
 
           echo "Updating Homebrew Formula"
