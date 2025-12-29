@@ -15,29 +15,75 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-      - run: cargo build --release
-      - run: mv target/release/Bbiribarabu bbiribarabu-linux
-      - uses: softprops/action-gh-release@v1
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          mv target/release/Bbiribarabu bbiribarabu
+          tar -czvf bbiribarabu-linux-x86_64.tar.gz bbiribarabu
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v1
         with:
-          files: bbiribarabu-linux
+          files: bbiribarabu-linux-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos:
     name: Build macOS binary
-    runs-on: macos-15-intel
+    runs-on: macos-13
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build macOS release binary
+
+      - name: Build
         run: |
           MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --release
-      - run: mv target/release/Bbiribarabu bbiribarabu-macos
-      - uses: softprops/action-gh-release@v1
+
+      - name: Package
+        run: |
+          mv target/release/Bbiribarabu bbiribarabu
+          tar -czvf bbiribarabu-macos-x86_64.tar.gz bbiribarabu
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v1
         with:
-          files: bbiribarabu-macos
+          files: bbiribarabu-macos-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: hefxpzwk/homebrew-tap
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update formula
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+
+          MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-x86_64.tar.gz"
+          MAC_SHA=$(curl -L $MAC_URL | shasum -a 256 | awk '{print $1}')
+
+          sed -i "s|url \".*\"|url \"$MAC_URL\"|" Formula/bbiribarabu.rb
+          sed -i "s|sha256 \".*\"|sha256 \"$MAC_SHA\"|" Formula/bbiribarabu.rb
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git commit -am "Update bbiribarabu to ${VERSION}"
+          git push
