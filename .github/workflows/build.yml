@@ -29,7 +29,7 @@ jobs:
           mv target/release/Bbiribarabu bbiribarabu
           tar -czvf bbiribarabu-linux-x86_64.tar.gz bbiribarabu
 
-      - name: Upload release asset
+      - name: Upload Linux release asset
         uses: softprops/action-gh-release@v1
         with:
           files: bbiribarabu-linux-x86_64.tar.gz
@@ -54,7 +54,7 @@ jobs:
           mv target/release/Bbiribarabu bbiribarabu
           tar -czvf bbiribarabu-macos-x86_64.tar.gz bbiribarabu
 
-      - name: Upload release asset
+      - name: Upload macOS release asset
         uses: softprops/action-gh-release@v1
         with:
           files: bbiribarabu-macos-x86_64.tar.gz
@@ -62,30 +62,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-homebrew:
-  name: Update Homebrew Formula
-  needs: [build-linux, build-macos]
-  runs-on: ubuntu-latest
+    name: Update Homebrew Formula
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
 
-  steps:
-    - name: Checkout Homebrew tap
-      uses: actions/checkout@v4
-      with:
-        repository: hefxpzwk/homebrew-tap
-        token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: hefxpzwk/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-    - name: Update formula
-      shell: bash
-      run: |
-        set -e
+      - name: Update formula
+        shell: bash
+        run: |
+          set -e
 
-        VERSION="${GITHUB_REF_NAME}"
-        MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-x86_64.tar.gz"
-        MAC_SHA=$(curl -sL "$MAC_URL" | shasum -a 256 | awk '{print $1}')
+          VERSION="${GITHUB_REF_NAME}"
+          MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-x86_64.tar.gz"
+          MAC_SHA=$(curl -sL "$MAC_URL" | shasum -a 256 | awk '{print $1}')
 
-        sed -i 's|^  url ".*"|  url "'"$MAC_URL"'"|' Formula/bbiribarabu.rb
-        sed -i 's|^  sha256 ".*"|  sha256 "'"$MAC_SHA"'"|' Formula/bbiribarabu.rb
+          echo "Updating Homebrew Formula"
+          echo "Version: $VERSION"
+          echo "URL: $MAC_URL"
+          echo "SHA: $MAC_SHA"
 
-        git config user.name "github-actions"
-        git config user.email "github-actions@github.com"
-        git commit -am "Update bbiribarabu to ${VERSION}"
-        git push
+          sed -i 's|^  url ".*"|  url "'"$MAC_URL"'"|' Formula/bbiribarabu.rb
+          sed -i 's|^  sha256 ".*"|  sha256 "'"$MAC_SHA"'"|' Formula/bbiribarabu.rb
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add Formula/bbiribarabu.rb
+          git commit -m "Update bbiribarabu to ${VERSION}"
+          git push
