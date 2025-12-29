@@ -38,7 +38,7 @@ jobs:
 
   build-macos:
     name: Build macOS binary
-    runs-on: macos-13
+    runs-on: macos-15-intel
 
     steps:
       - uses: actions/checkout@v4
@@ -67,21 +67,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout tap repo
+      - name: Checkout Homebrew tap
         uses: actions/checkout@v4
         with:
           repository: hefxpzwk/homebrew-tap
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update formula
+        shell: bash
         run: |
-          VERSION=${GITHUB_REF_NAME}
+          set -e
 
+          VERSION="${GITHUB_REF_NAME}"
           MAC_URL="https://github.com/hefxpzwk/Bbiribarabu/releases/download/${VERSION}/bbiribarabu-macos-x86_64.tar.gz"
-          MAC_SHA=$(curl -L $MAC_URL | shasum -a 256 | awk '{print $1}')
+          MAC_SHA=$(curl -sL "$MAC_URL" | shasum -a 256 | awk '{print $1}')
 
-          sed -i "s|url \".*\"|url \"$MAC_URL\"|" Formula/bbiribarabu.rb
-          sed -i "s|sha256 \".*\"|sha256 \"$MAC_SHA\"|" Formula/bbiribarabu.rb
+          echo "Updating Formula with:"
+          echo "URL: $MAC_URL"
+          echo "SHA: $MAC_SHA"
+
+          sed -i 's|^  url ".*"|  url "'"$MAC_URL"'"|' Formula/bbiribarabu.rb
+          sed -i 's|^  sha256 ".*"|  sha256 "'"$MAC_SHA"'"|' Formula/bbiribarabu.rb
 
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
